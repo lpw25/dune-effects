@@ -47,12 +47,20 @@ end
 
 module Int_map = Map.Make(Int)
 
+module Handler = struct
+
+  type 'a t = ('a, io, unit, global) continuation
+
+end
+
+module Task = struct
+
+  type t = Task : 'a * 'a Handler.t -> t
+
+end
+
 module Execution_context : sig
   type t
-  type 'a handler =
-    { run : ('a, unit, io, global) continuation
-    ; ctx : Execution_context.t
-    }
 
   val create_initial : unit -> t
   val forward_error : t -> exn -> unit
@@ -74,30 +82,43 @@ module Execution_context : sig
 
   val vars : t -> Binding.t Int_map.t
   val set_vars : t -> Binding.t Int_map.t -> t
+
+  val enqueue : t -> Task.t -> unit
+  val schedule : t -> unit
+
 end = struct
   type t =
     { on_error : exn -> unit (* This callback must never raise *)
     ; fibers   : int ref (* Number of fibers running in this execution
                             context *)
     ; vars     : Binding.t Int_map.t
-    ; on_release : unit -> unit
-    ; suspended : unit handler Queue.t
-    }
-
-  and 'a handler =
-    { run : ('a, unit, io, global) continuation
-    ; ctx : Execution_context.t
+    ; on_release : (t * unit Waiting.t) option
+    ; suspended : Task.t Queue.t
     }
 
   let vars t = t.vars
   let set_vars t vars = { t with vars }
 
+  let enqueue t s =
+    Queue.push s t.suspended
+
+  let schedule t =
+    match Queue.pop t.suspended with
+    | exception Queue.Empty -> ()
+    | Task.Task(x, k) -> continue k x
+
   let create_initial () =
     { on_error   = reraise
     ; fibers     = ref 1
     ; vars       = Int_map.empty
-    ; on_release = ignore
+    ; on_release = None
+    ; suspended = Queue.create ()
     }
+
+  let release () =
+    match on_release with
+    | None -> ()
+    | Some(ctx, cont) -> enqueue ctx cont
 
   let add_refs t n = t.fibers := !(t.fibers) + n
 
@@ -105,7 +126,7 @@ end = struct
     let n = !(t.fibers) - 1 in
     assert (n >= 0);
     t.fibers := n;
-    if n = 0 then t.on_release ()
+    if n = 0 then release ()
 
   let forward_error t exn =
     let bt = Printexc.get_raw_backtrace () in
@@ -141,10 +162,22 @@ end = struct
 
   let set_error_handler t ~on_error =
     { t with on_error }
+
 end
 
-module EC = Execution_context
+module Ctx = Execution_context
 
+module Waiting = struct
+
+  type 'a t =
+    { ctx : Ctx.t; cont : 'a Handler.t }
+
+  let activate t x =
+    Ctx.enqueue t.ctx (Task(x, t.cont))
+
+end
+
+(*
 let catch f ctx k =
   try
     f () ctx k
@@ -245,34 +278,34 @@ let parallel_iter l ~f ctx k =
         f x ctx k
       with exn ->
         EC.forward_error ctx exn)
-
-module Var = struct
+*)
+module Var1 = struct
   include Var0
 
-  let find ctx var =
-    match Int_map.find (EC.vars ctx) (id var) with
-    | None -> None
+  let get' var ctx k =
+    match Int_map.find (Ctx.vars ctx) (id var) with
+    | None -> continue k None
     | Some (Binding.T (var', v)) ->
       let eq = eq var' var in
-      Some (Eq.cast eq v)
+      continue k (Some (Eq.cast eq v))
 
-  let find_exn ctx var =
-    match Int_map.find (EC.vars ctx) (id var) with
-    | None -> failwith "Fiber.Var.find_exn"
+  let get_exn' var ctx k =
+    match Int_map.find (Ctx.vars ctx) (id var) with
+    | None -> discontinue k (Failure "Fiber.Var.find_exn")
     | Some (Binding.T (var', v)) ->
       let eq = eq var' var in
-      Eq.cast eq v
+      continue k (Eq.cast eq v)
 
-  let get     var ctx k = k (find     ctx var)
-  let get_exn var ctx k = k (find_exn ctx var)
-
-  let set (type a) (var : a t) x fiber ctx k =
+  let set' (type a) (var : a t) x f exec ctx k =
     let (module M) = var in
     let data = Binding.T (var, x) in
-    let ctx = EC.set_vars ctx (Int_map.add (EC.vars ctx) M.id data) in
-    fiber ctx k
-end
+    let ctx' =
+      Ctx.set_vars ctx (Int_map.add (Ctx.vars ctx) M.id data)
+    in
+    exec (fun () -> Ctx.enqueue ctx (Task(f (), k))) ctx' k
 
+end
+(*
 let with_error_handler f ~on_error ctx k =
   let on_error exn =
     try
@@ -324,42 +357,37 @@ let finalize f ~finally =
   | Ok x -> return x
   | Error () -> never
 
-module Handler = struct
-  type 'a t = 'a Execution_context.handler
+*)
 
-  let run t x =
-    try
-      t.run x
-    with exn ->
-      EC.forward_error t.ctx exn
-end
-
-module Ivar = struct
+module Ivar0 = struct
   type 'a state =
     | Full  of 'a
-    | Empty of 'a Handler.t Queue.t
+    | Empty of 'a Waiting.t Queue.t
 
   type 'a t = { mutable state : 'a state }
 
   let create () = { state = Empty (Queue.create ()) }
 
-  let fill t x _ctx k =
+  let fill' t x ctx k =
     match t.state with
-    | Full  _ -> failwith "Fiber.Ivar.fill"
+    | Full  _ -> discontinue k (Failure "Fiber.Ivar.fill")
     | Empty q ->
       t.state <- Full x;
       Queue.iter
         (fun handler ->
-           Handler.run handler x)
+           Waiting.activate handler x)
         q;
-      k ()
+      Ctx.enqueue ctx (Task((), k));
+      Ctx.schedule ctx
 
-  let read t ctx k =
+  let read' t ctx k =
     match t.state with
-    | Full  x -> k x
+    | Full  x -> continue k x
     | Empty q ->
-      Queue.push { Handler. run = k; ctx } q
+      Queue.push { Waiting. cont = k; ctx } q;
+      Ctx.schedule ctx
 end
+
 
 module Future = struct
   type 'a t = 'a Ivar.t
@@ -367,6 +395,7 @@ module Future = struct
   let wait = Ivar.read
 end
 
+(*
 let fork f ctx k =
   let ivar = Ivar.create () in
   EC.add_refs ctx 1;
@@ -457,25 +486,61 @@ let run t =
         loop ()
   in
   loop ()
+*)
 
-
-let yield ctx k =
-  Queue.push ctx.suspended { Handler. ctx; run = k }
-
-let schedule ctk =
-  match Queue.pop 
+let rec exec ctx f x =
+  match f x with
+  | () -> Ctx.schdeule ctx
+  | effect Yield(), k ->
+    Ctx.enqueue ctx (Task((), k));
+    Ctx.schedule ctx
+  | effect Fill(ivar, x), k ->
+    Ivar0.fill' ivar x ctx k
+  | effect Read(ivar), k ->
+    Ivar0.read' ivar ctx k
+  | effect Get(var), k ->
+    Var1.get' var ctx k
+  | effect Get_exn(var), k ->
+    Var1.get_exn' var ctx k
+  | effect Set(var, f), k ->
+    Var1.set' var f exec ctx k
 
 let run f x =
   let result = ref None in
-  let ctx = EC.create_initial () in
-  let rec exec f x =
-    match f x with
-    | x -> x
-    | effect Yield(), k ->
-      yield ctx k;
-      schedule ctx
-  in
-  exec (fun x -> result := Some (f x)) x;
+  let ctx = Ctx.create_initial () in
+  exec ctx (fun x -> result := Some (f x)) x;
   match !result with
   | None -> assert false
   | Some res -> res
+
+type 'a op =
+  | Yield : unit op
+  | Fill : 'b Ivar0.t * 'b -> unit op
+  | Read : 'a Ivar0.t -> 'a op
+  | Get : 'a Var0.t -> 'a option op
+  | Get_exn : 'a Var0.t -> 'a op
+  | Set : 'a Var0.t * 'a * (unit -[async]-> 'b) -> 'b op
+
+and effect async = ![ Async : 'a op -> 'a ]
+
+module Ivar = struct
+
+  include Ivar0
+
+  let fill t x = perform Async(Fill(t, x))
+
+  let read t = perform Async(Read t)
+
+end
+
+module Var = struct
+
+  include Var1
+
+  let get t = perform Async(Get t)
+
+  let get_exn t = perform Async(Get_exn t)
+
+  let set t x f = perform Async(Set(t, x, f)
+
+end
