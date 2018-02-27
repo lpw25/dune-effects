@@ -49,6 +49,10 @@ module Int_map = Map.Make(Int)
 
 module Execution_context : sig
   type t
+  type 'a handler =
+    { run : ('a, unit, io, global) continuation
+    ; ctx : Execution_context.t
+    }
 
   val create_initial : unit -> t
   val forward_error : t -> exn -> unit
@@ -77,6 +81,12 @@ end = struct
                             context *)
     ; vars     : Binding.t Int_map.t
     ; on_release : unit -> unit
+    ; suspended : unit handler Queue.t
+    }
+
+  and 'a handler =
+    { run : ('a, unit, io, global) continuation
+    ; ctx : Execution_context.t
     }
 
   let vars t = t.vars
@@ -135,45 +145,11 @@ end
 
 module EC = Execution_context
 
-type 'a t = Execution_context.t -> ('a -> unit) -> unit
-
-let return x _ k = k x
-
-let never _ _ = ()
-
 let catch f ctx k =
   try
     f () ctx k
   with exn ->
     EC.forward_error ctx exn
-
-module O = struct
-  let (>>>) a b ctx k =
-    a ctx (fun () -> b ctx k)
-
-  let (>>=) t f ctx k =
-    t ctx (fun x -> f x ctx k)
-
-  let (>>|) t f ctx k =
-    t ctx (fun x -> k (f x))
-end
-
-open O
-
-let both a b =
-  a >>= fun x ->
-  b >>= fun y ->
-  return (x, y)
-
-let all l =
-  let rec loop l acc =
-    match l with
-    | [] -> return (List.rev acc)
-    | t :: l -> t >>= fun x -> loop l (x :: acc)
-  in
-  loop l []
-
-let all_unit l = List.fold_left l ~init:(return ()) ~f:(>>>)
 
 type ('a, 'b) fork_and_join_state =
   | Nothing_yet
@@ -349,10 +325,7 @@ let finalize f ~finally =
   | Error () -> never
 
 module Handler = struct
-  type 'a t =
-    { run : 'a -> unit
-    ; ctx : Execution_context.t
-    }
+  type 'a t = 'a Execution_context.handler
 
   let run t x =
     try
@@ -461,8 +434,6 @@ end
 
 let suspended = ref []
 
-let yield () ctx k = suspended := { Handler. ctx; run = k } :: !suspended
-
 exception Never
 
 let run t =
@@ -486,3 +457,25 @@ let run t =
         loop ()
   in
   loop ()
+
+
+let yield ctx k =
+  Queue.push ctx.suspended { Handler. ctx; run = k }
+
+let schedule ctk =
+  match Queue.pop 
+
+let run f x =
+  let result = ref None in
+  let ctx = EC.create_initial () in
+  let rec exec f x =
+    match f x with
+    | x -> x
+    | effect Yield(), k ->
+      yield ctx k;
+      schedule ctx
+  in
+  exec (fun x -> result := Some (f x)) x;
+  match !result with
+  | None -> assert false
+  | Some res -> res
