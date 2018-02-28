@@ -47,65 +47,63 @@ end
 
 module Int_map = Map.Make(Int)
 
-module Handler = struct
-
-  type 'a t = ('a, io, unit, global) continuation
-
-end
-
-module Task = struct
-
-  type t = Task : 'a * 'a Handler.t -> t
-
-end
-
-module Execution_context : sig
-  type t
-
-  val create_initial : unit -> t
-  val forward_error : t -> exn -> unit
-
-  val add_refs : t -> int -> unit
-  val deref : t -> unit
-
-  (* Create a new context with a new referebce count. [on_release] is called when the
-     context is no longer used. *)
-  val create_sub
-    :  t
-    -> on_release:(unit -> unit)
-    -> t
-
-  val set_error_handler
-    :  t
-    -> on_error:(exn -> unit)
-    -> t
-
-  val vars : t -> Binding.t Int_map.t
-  val set_vars : t -> Binding.t Int_map.t -> t
-
-  val enqueue : t -> Task.t -> unit
-  val schedule : t -> unit
-
-end = struct
-  type t =
-    { on_error : exn -> unit (* This callback must never raise *)
-    ; fibers   : int ref (* Number of fibers running in this execution
+type !r ctx =
+  { on_error : exn -> unit; (* This callback must never raise *)
+    fibers   : int ref; (* Number of fibers running in this execution
                             context *)
-    ; vars     : Binding.t Int_map.t
-    ; on_release : (t * unit Waiting.t) option
-    ; suspended : Task.t Queue.t
-    }
+    vars     : Binding.t Int_map.t;
+    on_release : (t * unit waiting) option;
+    suspended : !r task Queue.t; }
+
+and ('a, !r) cont =
+  ('a, !r, unit, global) continuation
+
+and !r task =
+  | Cont : 'a * ('a, !r) cont -> task
+  | Cont_unit : (unit, !r) cont -> task
+  | Finish : 'a * ('a -[!r async | !r]-> 'b) * 'b ivar -> task
+
+and 'a waiting =
+    Waiting : !r ctx * ('a, !r) cont -> 'a waiting
+
+and 'a ivar_state =
+  | Full  of 'a
+  | Empty of 'a waiting Queue.t
+
+and 'a ivar = { mutable state : 'a ivar_state }
+
+and mutex =
+  { mutable locked  : bool;
+    mutable waiters : unit Waiting.t Queue.t; }
+
+and ('a, !r) op =
+  | Fill : 'b ivar * 'b -> (unit, !r) op
+  | Read : 'a ivar -> ('a, !r) op
+  | Get : 'a Var0.t -> ('a option, !r) op
+  | Get_exn : 'a Var0.t -> ('a, !r) op
+  | Set : 'a Var0.t * 'a * (unit -[!r async | !r]-> 'b) -> ('b, !r) op
+  | Lock : mutex -> (unit, !r) op
+  | Unlock : mutex -> (unit, !r) op
+  | Fork : 'a * ('a -[!r async | !r]-> 'b) -> ('b ivar, !r) op
+  | NFork : 'a list * ('a -[!r async | !r]-> 'b) -> ('b ivar list, !r) op
+  | Fork_and_join :
+      (unit -[!r async | !r]-> 'a) ->
+      (unit -[!r async | !r]-> 'b) ->
+      ('a * 'b, !r) op
+  | Parallel_map : 'a list * ('a -[!r async | !r]-> 'b) -> ('b list, !r) op
+  | Parallel_iter : 'a list * ('a -[!r async | !r]-> unit) -> (unit, !r) op
+  | Yield : (unit, !r) op
+  | With_error_handler : (unit -[!r async | !r]-> 'a) -> (exn -> unit) -> 'a op
+  | Wait_errors : (unit -[!r async | !r]-> 'a) -> 'a op
+
+and effect !r async = ![ Async : ('a, !r) op -> 'a ]
+
+module Ctx = struct
+
+  type t = ctx
 
   let vars t = t.vars
   let set_vars t vars = { t with vars }
-
-  let enqueue t s =
-    Queue.push s t.suspended
-
-  let schedule t =
-    match Queue.pop t.suspended with
-    | exception Queue.Empty -> ()
-    | Task.Task(x, k) -> continue k x
 
   let create_initial () =
     { on_error   = reraise
@@ -165,17 +163,146 @@ end = struct
 
 end
 
-module Ctx = Execution_context
+let enqueue t s =
+  Queue.push s t.suspended
 
-module Waiting = struct
+let activate (Waiting(ctx, cont)) x =
+  enqueue ctx (Cont(x, cont))
 
-  type 'a t =
-    { ctx : Ctx.t; cont : 'a Handler.t }
+let rec schedule ctx =
+  match Queue.pop ctx.suspended with
+  | exception Queue.Empty -> ()
+  | Cont(x, k) -> continue k x
+  | Cont_unit k -> continue k ()
+  | Finish(x, f, ivar) -> exec ctx (fun x -> finish ivar (f x)) x
 
-  let activate t x =
-    Ctx.enqueue t.ctx (Task(x, t.cont))
+and fill ivar x ctx k =
+  match ivar.state with
+  | Full  _ -> discontinue k (Failure "Fiber.Ivar.fill")
+  | Empty q ->
+    ivar.state <- Full x;
+    Queue.iter
+      (fun handler ->
+         Waiting.activate handler x)
+      q;
+    enqueue ctx (Cont_unit(k));
+    schedule ctx
 
-end
+and read ivar ctx k =
+  match ivar.state with
+  | Full  x -> continue k x
+  | Empty q ->
+    Queue.push { Waiting. cont = k; ctx } q;
+    schedule ctx
+
+and get var ctx k =
+  match Int_map.find (Ctx.vars ctx) (id var) with
+  | None -> continue k None
+  | Some (Binding.T (var', v)) ->
+    let eq = eq var' var in
+    continue k (Some (Eq.cast eq v))
+
+and get_exn var ctx k =
+  match Int_map.find (Ctx.vars ctx) (id var) with
+  | None -> discontinue k (Failure "Fiber.Var.find_exn")
+  | Some (Binding.T (var', v)) ->
+    let eq = eq var' var in
+    continue k (Eq.cast eq v)
+
+and set (type a) (var : a t) x f ctx k =
+  let (module M) = var in
+  let data = Binding.T (var, x) in
+  let ctx' =
+    Ctx.set_vars ctx (Int_map.add (Ctx.vars ctx) M.id data)
+  in
+  exec ctx' (fun () -> enqueue ctx (Cont(f (), k))) ()
+
+and lock lock ctx k =
+  if lock.locked then
+    Queue.push (Waiting(ctx, k)) lock.waiters;
+    schedule ctx
+  else begin
+    lock.locked <- true;
+    continue k ()
+  end
+
+and unlock lock _ctx k =
+  assert lock.locked;
+  if Queue.is_empty lock.waiters then begin
+    lock.locked <- false
+  end else begin
+    activate (Queue.pop lock.waiters)
+  end;
+  continue k ()
+
+and finish ivar x =
+  match ivar.state with
+  | Full  _ -> assert false
+  | Empty q ->
+    ivar.state <- Full x;
+    Queue.iter
+      (fun handler ->
+         Waiting.activate handler x)
+      q
+
+and fork f x ctx k =
+  let ivar = { state = Empty (Queue.create ()) } in
+  Ctx.add_refs ctx 1;
+  enqueue ctx (Cont(ivar, k));
+  exec ctx (fun x -> finish ivar (f x)) x
+
+and nfork l f ctx k =
+  match l with
+  | [] -> continue k []
+  | [x] ->
+    let ivar = { state = Empty (Queue.create ()) } in
+    Ctx.add_refs ctx 1;
+    enqueue ctx (Cont(ivar, k));
+    exec ctx (fun x -> finish ivar [f x]) x
+  | first :: rest ->
+    let n = List.length rest in
+    Ctx.add_refs ctx n;
+    let rest_ivars =
+      List.map rest ~f:(fun x ->
+        let ivar = { state = Empty (Queue.create ()) } in
+        enqueue ctx (Finish(x, f, ivar));
+        ivar)
+    in
+    let first_ivar = { state = Empty (Queue.create ()) } in
+    let ivars = first_ivar :: rest_ivars in
+    enqueue ctx (Cont(ivars, k));
+    exec ctx (fun x -> finish ivar (f x)) x
+
+  | Fork_and_join :
+      (unit -[!r async | !r]-> 'a) ->
+      (unit -[!r async | !r]-> 'b) ->
+      ('a * 'b, !r) op
+  | Parallel_map : 'a list * ('a -[!r async | !r]-> 'b) -> ('b list, !r) op
+  | Parallel_iter : 'a list * ('a -[!r async | !r]-> unit) -> (unit, !r) op
+
+and yield ctx k =
+  enqueue ctx (Cont_unit(k));
+  schedule ctx
+
+  | With_error_handler : (unit -[!r async | !r]-> 'a) -> (exn -> unit) -> 'a op
+  | Wait_errors : (unit -[!r async | !r]-> 'a) -> 'a op
+
+and exec ctx f x =
+  match f x with
+  | () -> schdeule ctx
+  | effect Async(Yield), k -> yield ctx k
+  | effect Async(Fill(ivar, x)), k -> fill ivar x ctx k
+  | effect Async(Read ivar), k -> read ivar ctx k
+  | effect Async(Get var), k -> get var ctx k
+  | effect Async(Get_exn var), k -> get_exn var ctx k
+  | effect Async(Set(var, f)), k -> set var f exec ctx k
+  | exception exn -> Ctx.forward_error ctx exn
+
+
+type ('a, 'b) fork_and_join_state =
+  | Nothing_yet
+  | Got_a of 'a
+  | Got_b of 'b
 
 (*
 let catch f ctx k =
@@ -183,11 +310,6 @@ let catch f ctx k =
     f () ctx k
   with exn ->
     EC.forward_error ctx exn
-
-type ('a, 'b) fork_and_join_state =
-  | Nothing_yet
-  | Got_a of 'a
-  | Got_b of 'b
 
 let fork_and_join fa fb ctx k =
   let state = ref Nothing_yet in
@@ -227,6 +349,10 @@ let fork_and_join_unit fa fb ctx k =
     | Got_a () -> k b
     | Got_b _ -> assert false)
 
+*)
+
+
+(*
 let list_of_option_array =
   let rec loop arr i acc =
     if i = 0 then
@@ -279,32 +405,7 @@ let parallel_iter l ~f ctx k =
       with exn ->
         EC.forward_error ctx exn)
 *)
-module Var1 = struct
-  include Var0
 
-  let get' var ctx k =
-    match Int_map.find (Ctx.vars ctx) (id var) with
-    | None -> continue k None
-    | Some (Binding.T (var', v)) ->
-      let eq = eq var' var in
-      continue k (Some (Eq.cast eq v))
-
-  let get_exn' var ctx k =
-    match Int_map.find (Ctx.vars ctx) (id var) with
-    | None -> discontinue k (Failure "Fiber.Var.find_exn")
-    | Some (Binding.T (var', v)) ->
-      let eq = eq var' var in
-      continue k (Eq.cast eq v)
-
-  let set' (type a) (var : a t) x f exec ctx k =
-    let (module M) = var in
-    let data = Binding.T (var, x) in
-    let ctx' =
-      Ctx.set_vars ctx (Int_map.add (Ctx.vars ctx) M.id data)
-    in
-    exec (fun () -> Ctx.enqueue ctx (Task(f (), k))) ctx' k
-
-end
 (*
 let with_error_handler f ~on_error ctx k =
   let on_error exn =
@@ -366,26 +467,8 @@ module Ivar0 = struct
 
   type 'a t = { mutable state : 'a state }
 
-  let create () = { state = Empty (Queue.create ()) }
+  
 
-  let fill' t x ctx k =
-    match t.state with
-    | Full  _ -> discontinue k (Failure "Fiber.Ivar.fill")
-    | Empty q ->
-      t.state <- Full x;
-      Queue.iter
-        (fun handler ->
-           Waiting.activate handler x)
-        q;
-      Ctx.enqueue ctx (Task((), k));
-      Ctx.schedule ctx
-
-  let read' t ctx k =
-    match t.state with
-    | Full  x -> continue k x
-    | Empty q ->
-      Queue.push { Waiting. cont = k; ctx } q;
-      Ctx.schedule ctx
 end
 
 
@@ -396,17 +479,6 @@ module Future = struct
 end
 
 (*
-let fork f ctx k =
-  let ivar = Ivar.create () in
-  EC.add_refs ctx 1;
-  begin
-    try
-      f () ctx (fun x -> Ivar.fill ivar x ctx ignore)
-    with exn ->
-      EC.forward_error ctx exn
-  end;
-  k ivar
-
 let nfork_map l ~f ctx k =
   match l with
   | [] -> k []
@@ -434,22 +506,6 @@ module Mutex = struct
     { mutable locked  : bool
     ; mutable waiters : unit Handler.t Queue.t
     }
-
-  let lock t ctx k =
-    if t.locked then
-      Queue.push { Handler. run = k; ctx } t.waiters
-    else begin
-      t.locked <- true;
-      k ()
-    end
-
-  let unlock t _ctx k =
-    assert t.locked;
-    if Queue.is_empty t.waiters then
-      t.locked <- false
-    else
-      Handler.run (Queue.pop t.waiters) ();
-    k ()
 
   let with_lock t f =
     lock t >>= fun () ->
@@ -488,23 +544,6 @@ let run t =
   loop ()
 *)
 
-let rec exec ctx f x =
-  match f x with
-  | () -> Ctx.schdeule ctx
-  | effect Yield(), k ->
-    Ctx.enqueue ctx (Task((), k));
-    Ctx.schedule ctx
-  | effect Fill(ivar, x), k ->
-    Ivar0.fill' ivar x ctx k
-  | effect Read(ivar), k ->
-    Ivar0.read' ivar ctx k
-  | effect Get(var), k ->
-    Var1.get' var ctx k
-  | effect Get_exn(var), k ->
-    Var1.get_exn' var ctx k
-  | effect Set(var, f), k ->
-    Var1.set' var f exec ctx k
-
 let run f x =
   let result = ref None in
   let ctx = Ctx.create_initial () in
@@ -513,19 +552,11 @@ let run f x =
   | None -> assert false
   | Some res -> res
 
-type 'a op =
-  | Yield : unit op
-  | Fill : 'b Ivar0.t * 'b -> unit op
-  | Read : 'a Ivar0.t -> 'a op
-  | Get : 'a Var0.t -> 'a option op
-  | Get_exn : 'a Var0.t -> 'a op
-  | Set : 'a Var0.t * 'a * (unit -[async]-> 'b) -> 'b op
-
-and effect async = ![ Async : 'a op -> 'a ]
-
 module Ivar = struct
 
-  include Ivar0
+  type t = ivar
+
+  let create () = { state = Empty (Queue.create ()) }
 
   let fill t x = perform Async(Fill(t, x))
 
@@ -535,7 +566,9 @@ end
 
 module Var = struct
 
-  include Var1
+  type t = Var0.t
+
+  let create = Var0.create
 
   let get t = perform Async(Get t)
 
