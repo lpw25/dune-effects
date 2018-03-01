@@ -98,39 +98,46 @@ and ('a, !r) op =
 
 and effect !r async = ![ Async : ('a, !r) op -> 'a ]
 
-module Ctx = struct
+type ('a, 'b) fork_and_join_state =
+  | Nothing_yet
+  | Got_a of 'a
+  | Got_b of 'b
 
-  type t = ctx
+let initial_context () =
+  { on_error   = reraise;
+    fibers     = ref 1;
+    vars       = Int_map.empty;
+    on_release = None;
+    suspended = Queue.create (); }
 
-  let vars t = t.vars
-  let set_vars t vars = { t with vars }
+let subcontext ctx ~on_release =
+  { ctx with on_release; fibers = ref 1 }
 
-  let create_initial () =
-    { on_error   = reraise
-    ; fibers     = ref 1
-    ; vars       = Int_map.empty
-    ; on_release = None
-    ; suspended = Queue.create ()
-    }
+let set_error_handler ctx ~on_error =
+  { ctx with on_error }
 
-  let release () =
-    match on_release with
-    | None -> ()
-    | Some(ctx, cont) -> enqueue ctx cont
+let enqueue ctx s =
+  Queue.push s ctx.suspended
 
-  let add_refs t n = t.fibers := !(t.fibers) + n
+let release ctx =
+  match ctx.on_release with
+  | None -> ()
+  | Some(ctx', cont) -> enqueue ctx' cont
 
-  let deref t =
-    let n = !(t.fibers) - 1 in
-    assert (n >= 0);
-    t.fibers := n;
-    if n = 0 then release ()
+let add_refs ctx n =
+  ctx.fibers := !(ctx.fibers) + n
 
-  let forward_error t exn =
-    let bt = Printexc.get_raw_backtrace () in
-    try
-      t.on_error exn
-    with exn2 ->
+let deref ctx =
+  let n = !(ctx.fibers) - 1 in
+  assert (n >= 0);
+  ctx.fibers := n;
+  if n = 0 then release ()
+
+let forward_error ctx exn =
+  let bt = Printexc.get_raw_backtrace () in
+  match ctx.on_error exn with
+  | () -> deref ctx
+  | exception exn2 ->
       (* We can't abort the execution at this point, so we just dump
          the error on stderr *)
       let bt2 = Printexc.get_backtrace () in
@@ -151,30 +158,28 @@ module Ctx = struct
          \\%s@."
         line s line
 
-  let forward_error t exn =
-    forward_error t exn;
-    deref t
-
-  let create_sub t ~on_release =
-    { t with on_release; fibers = ref 1 }
-
-  let set_error_handler t ~on_error =
-    { t with on_error }
-
-end
-
-let enqueue t s =
-  Queue.push s t.suspended
-
 let activate (Waiting(ctx, cont)) x =
   enqueue ctx (Cont(x, cont))
+
+let list_of_option_array a =
+  let rec loop arr i acc =
+    if i = 0 then
+      acc
+    else
+      let i = i - 1 in
+      match arr.(i) with
+      | None -> assert false
+      | Some x ->
+        loop arr i (x :: acc)
+  in
+  loop a (Array.length a) []
 
 let rec schedule ctx =
   match Queue.pop ctx.suspended with
   | exception Queue.Empty -> ()
   | Cont(x, k) -> continue k x
   | Cont_unit k -> continue k ()
-  | Finish(x, f, ivar) -> exec ctx (fun x -> finish ivar (f x)) x
+  | Exec(x, f, g) -> exec ctx x f g
 
 and fill ivar x ctx k =
   match ivar.state with
@@ -215,7 +220,7 @@ and set (type a) (var : a t) x f ctx k =
   let ctx' =
     Ctx.set_vars ctx (Int_map.add (Ctx.vars ctx) M.id data)
   in
-  exec ctx' (fun () -> enqueue ctx (Cont(f (), k))) ()
+  exec ctx' () f (fun _ res -> continue k res)
 
 and lock lock ctx k =
   if lock.locked then
@@ -235,7 +240,7 @@ and unlock lock _ctx k =
   end;
   continue k ()
 
-and finish ivar x =
+and finish ivar ctx x =
   match ivar.state with
   | Full  _ -> assert false
   | Empty q ->
@@ -243,13 +248,14 @@ and finish ivar x =
     Queue.iter
       (fun handler ->
          Waiting.activate handler x)
-      q
+      q;
+    schedule ctx
 
 and fork f x ctx k =
   let ivar = { state = Empty (Queue.create ()) } in
   Ctx.add_refs ctx 1;
   enqueue ctx (Cont(ivar, k));
-  exec ctx (fun x -> finish ivar (f x)) x
+  exec ctx x f (finish ivar)
 
 and nfork l f ctx k =
   match l with
@@ -258,51 +264,115 @@ and nfork l f ctx k =
     let ivar = { state = Empty (Queue.create ()) } in
     Ctx.add_refs ctx 1;
     enqueue ctx (Cont(ivar, k));
-    exec ctx (fun x -> finish ivar [f x]) x
+    exec ctx x f (fun ctx res -> finish ivar ctx [res])
   | first :: rest ->
     let n = List.length rest in
     Ctx.add_refs ctx n;
     let rest_ivars =
       List.map rest ~f:(fun x ->
         let ivar = { state = Empty (Queue.create ()) } in
-        enqueue ctx (Finish(x, f, ivar));
+        enqueue ctx (Exec(x, f, finish ivar));
         ivar)
     in
     let first_ivar = { state = Empty (Queue.create ()) } in
     let ivars = first_ivar :: rest_ivars in
     enqueue ctx (Cont(ivars, k));
-    exec ctx (fun x -> finish ivar (f x)) x
+    exec ctx f x (finish ivar)
 
-  | Fork_and_join :
-      (unit -[!r async | !r]-> 'a) ->
-      (unit -[!r async | !r]-> 'b) ->
-      ('a * 'b, !r) op
-  | Parallel_map : 'a list * ('a -[!r async | !r]-> 'b) -> ('b list, !r) op
-  | Parallel_iter : 'a list * ('a -[!r async | !r]-> unit) -> (unit, !r) op
+and fork_and_join fa fb ctx k =
+  let state = ref Nothing_yet in
+  let finish_a ctx a =
+    match !state with
+    | Nothing_yet -> EC.deref ctx; state := Got_a a; schedule ctx
+    | Got_a _ -> assert false
+    | Got_b b -> continue k (a, b)
+  in
+  let finish_b ctx b =
+    match !state with
+    | Nothing_yet -> EC.deref ctx; state := Got_b b; schedule ctx
+    | Got_a a -> continue k (a, b)
+    | Got_b _ -> assert false
+  in
+  EC.add_refs ctx 1;
+  enqueue ctx (Exec((), fb, finish_b));
+  exec ctx () fa finish_a
+
+and parallel_map l f ctx k =
+  match l with
+  | [] -> continue k []
+  | [x] ->
+    exec ctx x f (fun x -> continue k [x])
+  | first :: rest ->
+    let n = List.length l in
+    EC.add_refs ctx (n - 1);
+    let left_over = ref n in
+    let results = Array.make n None in
+    let finish_i i ctx x =
+      results.(i) <- Some y;
+      decr left_over;
+      if !left_over = 0 then begin
+        continue k (list_of_option_array results)
+      edn else begin
+        EC.deref ctx;
+        schdule ctx
+      end
+    in
+    List.iteri rest ~f:(fun i x ->
+      enqueue ctx (Exec(x, f, finish_i (i + 1))));
+    exec ctx first f (finish_i 0)
+
+and parallel_iter l f ctx k =
+  match l with
+  | [] -> continue k []
+  | [x] -> exec ctx x f (continue k)
+  | first :: rest ->
+    let n = List.length l in
+    EC.add_refs ctx (n - 1);
+    let left_over = ref n in
+    let finish ctx () =
+      decr left_over;
+      if !left_over = 0 then begin
+        continue k ()
+      end else begin
+        EC.deref ctx;
+        schedule ctx
+      end
+    in
+    List.iter rest ~f:(fun x ->
+      enqueue ctx (Exec(x, f, finish)));
+    exec ctx first f finish
 
 and yield ctx k =
   enqueue ctx (Cont_unit(k));
   schedule ctx
-
+(*
   | With_error_handler : (unit -[!r async | !r]-> 'a) -> (exn -> unit) -> 'a op
   | Wait_errors : (unit -[!r async | !r]-> 'a) -> 'a op
-
-and exec ctx f x =
+*)
+and exec ctx x f g =
   match f x with
-  | () -> schdeule ctx
+  | res -> g ctx res
   | effect Async(Yield), k -> yield ctx k
   | effect Async(Fill(ivar, x)), k -> fill ivar x ctx k
   | effect Async(Read ivar), k -> read ivar ctx k
   | effect Async(Get var), k -> get var ctx k
   | effect Async(Get_exn var), k -> get_exn var ctx k
   | effect Async(Set(var, f)), k -> set var f exec ctx k
+  | Lock( mutex -> (unit, !r) op), k ->
+  | Unlock( mutex -> (unit, !r) op), k ->
+  | Fork( 'a * ('a -[!r async | !r]-> 'b) -> ('b ivar, !r) op), k ->
+  | NFork( 'a list * ('a -[!r async | !r]-> 'b) -> ('b ivar list, !r) op), k ->
+  | Fork_and_join(), k ->
+      (unit -[!r async | !r]-> 'a) ->
+      (unit -[!r async | !r]-> 'b) ->
+      ('a * 'b, !r) op
+  | Parallel_map( 'a list * ('a -[!r async | !r]-> 'b) -> ('b list, !r) op), k ->
+  | Parallel_iter( 'a list * ('a -[!r async | !r]-> unit) -> (unit, !r) op), k ->
+  | Yield( (unit, !r) op), k ->
+  | With_error_handler( (unit -[!r async | !r]-> 'a) -> (exn -> unit) -> 'a op), k ->
+  | Wait_errors( (unit -[!r async | !r]-> 'a) -> 'a op), k ->
+
   | exception exn -> Ctx.forward_error ctx exn
-
-
-type ('a, 'b) fork_and_join_state =
-  | Nothing_yet
-  | Got_a of 'a
-  | Got_b of 'b
 
 (*
 let catch f ctx k =
