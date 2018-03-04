@@ -96,8 +96,8 @@ module Exec_status = struct
   type rule_evaluation = (Action.t * Pset.t) Fiber.Future.t
   type rule_execution = unit Fiber.Future.t
 
-  type eval_rule = unit -[![] async]-> Action.t * Pset.t
-  type exec_rule = rule_evaluation -[![] async]-> unit
+  type eval_rule = unit -[async]-> Action.t * Pset.t
+  type exec_rule = rule_evaluation -[async]-> unit
 
   module Evaluating_rule = struct
     type t =

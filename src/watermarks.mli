@@ -5,4 +5,4 @@ open Import
 
     This is only used when a package is pinned. *)
 
-val subst : ?name:string -> unit -[!r async]-> unit
+val subst : ?name:string -> unit -[async]-> unit

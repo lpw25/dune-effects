@@ -3,9 +3,9 @@
 (** {1 Generals} *)
 
 (** Type of asynchronous operations  *)
-type ('a, !r) op
+type 'a op
 
-effect !r async = ![ Async : 'a. ('a, !r) op -> 'a ]
+effect async = ![ Async : 'a. 'a op -> 'a ]
 
 (** {1 Forking execution} *)
 
@@ -15,19 +15,19 @@ module Future : sig
   type 'a t
 
   (** Wait for the given future to yield a value. *)
-  val wait : 'a t -[!r async]-> 'a
+  val wait : 'a t -[async]-> 'a
 
 end
 
 (** [fork f] creates a sub-fiber and return a [Future.t] to wait its result. *)
-val fork : (unit -[!r async | !r]-> 'a) -[!r async]-> 'a Future.t
+val fork : (unit -[async]-> 'a) -[async]-> 'a Future.t
 
 (** [nfork l] is similar to [fork] but creates [n] sub-fibers. *)
-val nfork : (unit -[!r async | !r]-> 'a) list -[!r async]-> 'a Future.t list
+val nfork : (unit -[async]-> 'a) list -[async]-> 'a Future.t list
 
 (** [nfork_map l ~f] is the same as [nfork (List.map l ~f:(fun x () -> f x))] but more
     efficient. *)
-val nfork_map : 'a list ->> f:('a -[!r async | !r]-> 'b) -[!r async]-> 'b Future.t list
+val nfork_map : 'a list ->> f:('a -[async]-> 'b) -[async]-> 'b Future.t list
 
 (** {1 Forking + joining} *)
 
@@ -45,7 +45,7 @@ val nfork_map : 'a list ->> f:('a -[!r async | !r]-> 'b) -[!r async]-> 'b Future
         both (Future.wait a) (Future.wait b)
       ]}
 *)
-val fork_and_join : (unit -[!r async | !r]-> 'a) ->> (unit -[!r async | !r]-> 'b) -[!r async]-> 'a * 'b
+val fork_and_join : (unit -[async]-> 'a) ->> (unit -[async]-> 'b) -[async]-> 'a * 'b
 
 (** Same but assume the first fiber returns [unit]:
 
@@ -56,7 +56,7 @@ val fork_and_join : (unit -[!r async | !r]-> 'a) ->> (unit -[!r async | !r]-> 'b
         Future.wait a >>> Future.wait b
     ]}
 *)
-val fork_and_join_unit : (unit -[!r async | !r]-> unit) ->> (unit -[!r async | !r]-> 'a) -[!r async]-> 'a
+val fork_and_join_unit : (unit -[async]-> unit) ->> (unit -[async]-> 'a) -[async]-> 'a
 
 (** Map a list in parallel:
 
@@ -66,7 +66,7 @@ val fork_and_join_unit : (unit -[!r async | !r]-> unit) ->> (unit -[!r async | !
         all (List.map futures ~f:Future.wait)
     ]}
 *)
-val parallel_map : 'a list ->> f:('a -[!r async | !r]-> 'b) -[!r async]-> 'b list
+val parallel_map : 'a list ->> f:('a -[async]-> 'b) -[async]-> 'b list
 
 (** Iter over a list in parallel:
 
@@ -76,7 +76,7 @@ val parallel_map : 'a list ->> f:('a -[!r async | !r]-> 'b) -[!r async]-> 'b lis
         all_unit (List.map futures ~f:Future.wait)
     ]}
 *)
-val parallel_iter : 'a list ->> f:('a -[!r async | !r]-> unit) -[!r async]-> unit
+val parallel_iter : 'a list ->> f:('a -[async]-> unit) -[async]-> unit
 
 (** {1 Local storage} *)
 
@@ -88,10 +88,10 @@ module Var : sig
   val create : unit -> 'a t
 
   (** [get var] is a fiber that reads the value of [var] *)
-  val get : 'a t -[!r async]-> 'a option
+  val get : 'a t -[async]-> 'a option
 
   (** Same as [get] but raises if [var] is unset. *)
-  val get_exn : 'a t -[!r async]-> 'a
+  val get_exn : 'a t -[async]-> 'a
 
   (** [set var value fiber] sets [var] to [value] during the execution
       of [fiber].
@@ -102,7 +102,7 @@ module Var : sig
         set v x (get_exn v >>| fun y -> x = y)
       ]}
  *)
-  val set : 'a t ->> 'a ->> (unit -[!r async | !r]-> 'c) -[!r async]-> 'c
+  val set : 'a t ->> 'a ->> (unit -[async]-> 'c) -[async]-> 'c
 end
 
 (** {1 Error handling} *)
@@ -116,9 +116,9 @@ end
     called.
 *)
 val with_error_handler
-  :  (unit -[!r async | !r]-> 'a)
+  :  (unit -[async]-> 'a)
   -> on_error:(exn -> unit)
-  -[!r async]-> 'a
+  -[async]-> 'a
 
 (** If [t] completes without raising, then [wait_errors t] is the same as [t () >>| fun x
     -> Ok x]. However, if the execution of [t] is aborted by an exception, then
@@ -142,7 +142,7 @@ val with_error_handler
          raise Exit)
     }]
 *)
-val wait_errors : (unit -[!r async | !r]-> 'a)  -[!r async]-> ('a, unit) Result.t
+val wait_errors : (unit -[async]-> 'a)  -[async]-> ('a, unit) Result.t
 
 (** [fold_errors f ~init ~on_error] calls [on_error] for every exception raised during the
     execution of [f]. This include exceptions raised when calling [f ()] or during the
@@ -150,10 +150,10 @@ val wait_errors : (unit -[!r async | !r]-> 'a)  -[!r async]-> ('a, unit) Result.
 
     Exceptions raised by [on_error] are passed on to the parent error handler. *)
 val fold_errors
-  :  (unit -[!r async | !r]-> 'a)
+  :  (unit -[async]-> 'a)
   -> init:'b
   -> on_error:(exn -> 'b -> 'b)
-  -[!r async]-> ('a, 'b) Result.t
+  -[async]-> ('a, 'b) Result.t
 
 (** [collect_errors f] is:
 
@@ -164,15 +164,15 @@ val fold_errors
     ]}
 *)
 val collect_errors
-  :  (unit -[!r async | !r]-> 'a)
-  -[!r async]-> ('a, exn list) Result.t
+  :  (unit -[async]-> 'a)
+  -[async]-> ('a, exn list) Result.t
 
 (** [finalize f ~finally] runs [finally] after [f ()] has terminated,
     whether it fails or succeeds. *)
 val finalize
-  :  (unit -[!r async | !r]-> 'a)
-  -> finally:(unit -[!r async]-> unit)
-  -[!r async]-> 'a
+  :  (unit -[async]-> 'a)
+  -> finally:(unit -[async]-> unit)
+  -[async]-> 'a
 
 (** {1 Synchronization} *)
 
@@ -186,26 +186,26 @@ module Ivar : sig
   val create : unit -> 'a t
 
   (** Read the contents of the ivar. *)
-  val read : 'a t -[!r async]-> 'a
+  val read : 'a t -[async]-> 'a
 
   (** Fill the ivar with the following value. This can only be called
       once for a given ivar. *)
-  val fill : 'a t -> 'a -[!r async]-> unit
+  val fill : 'a t -> 'a -[async]-> unit
 end
 
 module Mutex : sig
   type t
   val create : unit -> t
-  val with_lock : t ->> (unit -[!r async | !r]-> 'a) -[!r async]-> 'a
+  val with_lock : t ->> (unit -[async]-> 'a) -[async]-> 'a
 end
 
 (** {1 Running fibers} *)
 
 (** Wait for one iteration of the scheduler *)
-val yield : unit -[!r async]-> unit
+val yield : unit -[async]-> unit
 
 (** [run t] runs a fiber until it yield a result. If it becomes clear that the execution
     of the fiber will never terminate, raise [Never]. *)
-val run : ('a -[!r async | !r]-> 'b) ->> 'a -[!r]-> 'b
+val run : ('a -[async]-> 'b) ->> 'a -> 'b
 
 exception Never

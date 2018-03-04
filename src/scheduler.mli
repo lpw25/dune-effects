@@ -8,21 +8,21 @@ val go
   :  ?log:Log.t
   -> ?config:Config.t
   -> ?gen_status_line:(unit -> string option)
-  -> (unit ~[!~ async]~> 'a)
+  -> (unit -[async]-> 'a)
   ~> 'a
 
 (** Wait for the following process to terminate *)
-val wait_for_process : int -[!r async]-> Unix.process_status
+val wait_for_process : int -[async]-> Unix.process_status
 
 (** Set the status line generator for the current scheduler *)
-val set_status_line_generator : (unit -> string option) -[!r async]-> unit
+val set_status_line_generator : (unit -> string option) -[async]-> unit
 
 (** Scheduler informations *)
 type t
 
 (** Wait until less tham [!Clflags.concurrency] external processes are running and return
     the scheduler informations. *)
-val wait_for_available_job : unit -[!r async]-> t
+val wait_for_available_job : unit -[async]-> t
 
 (** Logger *)
 val log : t -> Log.t

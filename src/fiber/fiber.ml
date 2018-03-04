@@ -47,26 +47,26 @@ end
 
 module Int_map = Map.Make(Int)
 
-type !r ctx =
-  { on_error : exn -[!r]-> unit; (* This callback must never raise *)
+type ctx =
+  { on_error : exn -> unit; (* This callback must never raise *)
     fibers   : int ref; (* Number of fibers running in this execution
                             context *)
     vars     : Binding.t Int_map.t;
-    on_release : unit -[!r]-> unit;
-    suspended : !r task Queue.t; }
+    on_release : unit -> unit;
+    suspended : task Queue.t; }
 
-and ('a, !r) cont =
-  ('a, ![io | !r], unit, global) continuation
+and 'a cont =
+  ('a, ![io], unit, global) continuation
 
-and !r task =
-  | Cont : 'a * ('a, !r) cont -> !r task
-  | Cont_unit : (unit, !r) cont -> !r task
+and task =
+  | Cont : 'a * 'a cont -> task
+  | Cont_unit : unit cont -> task
   | Exec :
-      !r ctx * 'a * ('a -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'b)
-      * (!r ctx ->> 'b -[!r]-> unit) -> !r task
+      ctx * 'a * ('a -[Async : 'o. 'o op -> 'o]-> 'b)
+      * (ctx ->> 'b -> unit) -> task
 
 and 'a waiting =
-    Waiting : !r ctx * ('a, !r) cont -> 'a waiting
+    Waiting : ctx * 'a cont -> 'a waiting
 
 and 'a ivar_state =
   | Full  of 'a
@@ -78,39 +78,36 @@ and mutex =
   { mutable locked  : bool;
     mutable waiters : unit waiting Queue.t; }
 
-and ('a, !r) op =
-  | Never : ('a, !r) op
+and 'a op =
+  | Never : 'a op
   | Fork :
-      'a * ('a -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'b) -> ('b ivar, !r) op
+      'a * ('a -[Async : 'o. 'o op -> 'o]-> 'b) -> 'b ivar op
   | NFork :
-      'a list * ('a -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'b) ->
-      ('b ivar list, !r) op
+      'a list * ('a -[Async : 'o. 'o op -> 'o]-> 'b) ->
+      'b ivar list op
   | Fork_and_join :
-      (unit -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'a) *
-      (unit -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'b) ->
-      ('a * 'b, !r) op
+      (unit -[Async : 'o. 'o op -> 'o]-> 'a) *
+      (unit -[Async : 'o. 'o op -> 'o]-> 'b) ->
+      ('a * 'b) op
   | Parallel_map :
-      'a list * ('a -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'b) -> ('b list, !r) op
+      'a list * ('a -[Async : 'o. 'o op -> 'o]-> 'b) -> 'b list op
   | Parallel_iter :
-      'a list * ('a -[Async : 'o. ('o, !r) op -> 'o | !r]-> unit) -> (unit, !r) op
-  | Get : 'a Var0.t -> ('a option, !r) op
-  | Get_exn : 'a Var0.t -> ('a, !r) op
+      'a list * ('a -[Async : 'o. 'o op -> 'o]-> unit) -> unit op
+  | Get : 'a Var0.t -> 'a option op
+  | Get_exn : 'a Var0.t -> 'a op
   | Set :
-      'a Var0.t * 'a * (unit -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'b) ->
-      ('b, !r) op
+      'a Var0.t * 'a * (unit -[Async : 'o. 'o op -> 'o]-> 'b) -> 'b op
   | With_error_handler :
-      (unit -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'a) * (exn -> unit) ->
-      ('a, !r) op
+      (unit -[Async : 'o. 'o op -> 'o]-> 'a) * (exn -> unit) -> 'a op
   | Wait_errors :
-      (unit -[Async : 'o. ('o, !r) op -> 'o | !r]-> 'a) ->
-      (('a, unit) result, !r) op
-  | Fill : 'b ivar * 'b -> (unit, !r) op
-  | Read : 'a ivar -> ('a, !r) op
-  | Lock : mutex -> (unit, !r) op
-  | Unlock : mutex -> (unit, !r) op
-  | Yield : (unit, !r) op
+      (unit -[Async : 'o. 'o op -> 'o]-> 'a) -> ('a, unit) result op
+  | Fill : 'b ivar * 'b -> unit op
+  | Read : 'a ivar -> 'a op
+  | Lock : mutex -> unit op
+  | Unlock : mutex -> unit op
+  | Yield : unit op
 
-effect !r async = ![ Async : 'o. ('o, !r) op -> 'o ]
+effect async = ![ Async : 'o. 'o op -> 'o ]
 
 type ('a, 'b) fork_and_join_state =
   | Nothing_yet
@@ -159,8 +156,8 @@ let list_of_option_array a =
   loop a (Array.length a) []
 
 let rec exec :
-  'a 'b !r. !r ctx ->> 'a ->>
-  ('a -[!r async | !r]-> 'b) ->> (!r ctx -> 'b -[!r]-> unit) -[!r]-> unit =
+  'a 'b. ctx ->> 'a ->>
+  ('a -[async]-> 'b) ->> (ctx -> 'b -> unit) -> unit =
   fun ctx x f g ->
     match f x with
     | res -> g ctx res
@@ -186,7 +183,7 @@ let rec exec :
         | Yield -> yield ctx k
       end
 
-and schedule : !r. !r ctx -[!r]-> unit =
+and schedule : ctx -> unit =
   fun ctx ->
     match Queue.pop ctx.suspended with
     | exception Queue.Empty -> ()
@@ -194,7 +191,7 @@ and schedule : !r. !r ctx -[!r]-> unit =
     | Cont_unit k -> continue k ()
     | Exec(ctx', x, f, g) -> exec ctx' x f g
 
-and deref : !r. !r ctx -[!r]-> unit =
+and deref : 'a. ctx -> unit =
   fun ctx ->
     let n = !(ctx.fibers) - 1 in
     assert (n >= 0);
@@ -202,7 +199,7 @@ and deref : !r. !r ctx -[!r]-> unit =
     if n = 0 then release ctx
     else schedule ctx
 
-and forward_error : !r. bool -> !r ctx -> exn -[!r]-> unit =
+and forward_error : 'a. bool -> ctx -> exn -> unit =
   fun drf ctx exn ->
     let bt = Printexc.get_raw_backtrace () in
     match ctx.on_error exn with
@@ -228,11 +225,11 @@ and forward_error : !r. bool -> !r ctx -> exn -[!r]-> unit =
            \\%s@."
           line s line
 
-and never : 'a !r. !r ctx ->> ('a, !r) cont -[!r]-> unit =
+and never : 'a. ctx ->> 'a cont -> unit =
  fun ctx _ ->
    schedule ctx
 
-and finish : 'a !r. 'a ivar ->> !r ctx ->> 'a -[!r]-> unit =
+and finish : 'a. 'a ivar ->> ctx ->> 'a -> unit =
   fun ivar ctx x ->
     match ivar.state with
     | Full  _ -> assert false
@@ -242,8 +239,8 @@ and finish : 'a !r. 'a ivar ->> !r ctx ->> 'a -[!r]-> unit =
       schedule ctx
 
 and fork :
-  'a 'b !r. 'a ->> ('a -[!r async | !r]-> 'b) ->> !r ctx ->>
-    ('b ivar, !r) cont -[!r]-> unit =
+  'a 'b. 'a ->> ('a -[async]-> 'b) ->> ctx ->>
+    'b ivar cont -> unit =
     fun x f ctx k ->
       let ivar = { state = Empty (Queue.create ()) } in
       add_refs ctx 1;
@@ -251,8 +248,8 @@ and fork :
       exec ctx x f (finish ivar)
 
 and nfork :
-  'a 'b !r. 'a list ->> ('a -[!r async| !r]-> 'b) ->>
-    !r ctx ->> ('b ivar list, !r) cont -[!r]-> unit =
+  'a 'b. 'a list ->> ('a -[async]-> 'b) ->>
+    ctx ->> 'b ivar list cont -> unit =
   fun l f ctx k ->
     match l with
     | [] -> continue k []
@@ -276,8 +273,8 @@ and nfork :
       exec ctx first f (finish first_ivar)
 
 and fork_and_join :
-  'a 'b !r. (unit -[!r async | !r]-> 'a) ->> (unit -[!r async | !r]-> 'b) ->>
-      !r ctx ->> ('a * 'b, !r) cont -[!r]-> unit =
+  'a 'b. (unit -[async]-> 'a) ->> (unit -[async]-> 'b) ->>
+      ctx ->> ('a * 'b) cont -> unit =
   fun fa fb ctx k ->
     let state = ref Nothing_yet in
     let finish_a ctx a =
@@ -297,8 +294,8 @@ and fork_and_join :
     exec ctx () fa finish_a
 
 and parallel_map :
-      'a 'b !r. 'a list ->> ('a -[!r async | !r]-> 'b) ->>
-        !r ctx ->> ('b list, !r) cont -[!r]-> unit =
+      'a 'b. 'a list ->> ('a -[async]-> 'b) ->>
+        ctx ->> 'b list cont -> unit =
   fun l f ctx k ->
     match l with
     | [] -> continue k []
@@ -323,8 +320,8 @@ and parallel_map :
       exec ctx first f (finish_i 0)
 
 and parallel_iter :
-  'a !r. 'a list ->> ('a -[!r async | !r]-> unit) ->>
-    !r ctx ->> (unit, !r) cont -[!r]-> unit =
+  'a. 'a list ->> ('a -[async]-> unit) ->>
+    ctx ->> unit cont -> unit =
   fun l f ctx k ->
     match l with
     | [] -> continue k ()
@@ -346,7 +343,7 @@ and parallel_iter :
       exec ctx first f finish
 
 and get :
-  'a !r. 'a Var0.t ->> !r ctx ->> ('a option, !r) cont -[!r]-> unit =
+  'a. 'a Var0.t ->> ctx ->> 'a option cont -> unit =
   fun var ctx k ->
     match Int_map.find ctx.vars (Var0.id var) with
     | None -> continue k None
@@ -355,7 +352,7 @@ and get :
       continue k (Some (Eq.cast eq v))
 
 and get_exn :
-  'a !r. 'a Var0.t ->> !r ctx ->> ('a, !r) cont -[!r]-> unit =
+  'a. 'a Var0.t ->> ctx ->> 'a cont -> unit =
   fun var ctx k ->
     match Int_map.find ctx.vars (Var0.id var) with
     | None -> discontinue k (Failure "Fiber.Var.find_exn")
@@ -364,8 +361,8 @@ and get_exn :
       continue k (Eq.cast eq v)
 
 and set :
-  'a 'b !r. 'a Var0.t ->> 'a ->> (unit -[!r async | !r]-> 'b) ->>
-    !r ctx ->> ('b, !r) cont -[!r]-> unit =
+  'a 'b. 'a Var0.t ->> 'a ->> (unit -[async]-> 'b) ->>
+    ctx ->> 'b cont -> unit =
   fun (type t) (var : t Var0.t) x f ctx k ->
     let (module M) = var in
     let data = Binding.T (var, x) in
@@ -373,8 +370,8 @@ and set :
     exec ctx' () f (fun _ res -> continue k res)
 
 and with_error_handler :
-  'a !r. (unit -[!r async | !r]-> 'a) ->> (exn -[!r]-> unit) ->>
-      !r ctx ->> ('a, !r) cont -[!r]-> unit =
+  'a. (unit -[async]-> 'a) ->> (exn -> unit) ->>
+      ctx ->> 'a cont -> unit =
   fun f err ctx k ->
     let on_error exn =
       try
@@ -386,8 +383,8 @@ and with_error_handler :
     exec ctx' () f (fun _ x -> continue k x)
 
 and wait_errors :
-  'a !r. (unit -[!r async | !r]-> 'a) ->>
-    !r ctx ->> (('a, unit) result, !r) cont -[!r]-> unit =
+  'a. (unit -[async]-> 'a) ->>
+    ctx ->> ('a, unit) result cont -> unit =
   fun f ctx k ->
     let result = ref (Result.Error ()) in
     let on_release () = continue k !result in
@@ -398,7 +395,7 @@ and wait_errors :
     in
     exec ctx' () f finish
 
-and fill : 'a !r. 'a ivar ->> 'a ->> !r ctx ->> (unit, !r) cont -[!r]-> unit =
+and fill : 'a. 'a ivar ->> 'a ->> ctx ->> unit cont -> unit =
   fun ivar x ctx k ->
     match ivar.state with
     | Full  _ -> discontinue k (Failure "Fiber.Ivar.fill")
@@ -408,7 +405,7 @@ and fill : 'a !r. 'a ivar ->> 'a ->> !r ctx ->> (unit, !r) cont -[!r]-> unit =
       enqueue ctx (Cont_unit(k));
       schedule ctx
 
-and read : 'a !r. 'a ivar ->> !r ctx ->> ('a, !r) cont -[!r]-> unit =
+and read : 'a. 'a ivar ->> ctx ->> 'a cont -> unit =
   fun ivar ctx k ->
     match ivar.state with
     | Full  x -> continue k x
@@ -416,7 +413,7 @@ and read : 'a !r. 'a ivar ->> !r ctx ->> ('a, !r) cont -[!r]-> unit =
       Queue.push (Waiting(ctx, k)) q;
       schedule ctx
 
-and lock : !r. mutex ->> !r ctx ->> (unit, !r) cont -[!r]-> unit  =
+and lock : 'a. mutex ->> ctx ->> unit cont -> unit  =
   fun lock ctx k ->
     if lock.locked then begin
       Queue.push (Waiting(ctx, k)) lock.waiters;
@@ -426,7 +423,7 @@ and lock : !r. mutex ->> !r ctx ->> (unit, !r) cont -[!r]-> unit  =
       continue k ()
     end
 
-and unlock : !r. mutex ->> !r ctx ->> (unit, !r) cont -[!r]-> unit  =
+and unlock : 'a. mutex ->> ctx ->> unit cont -> unit  =
   fun lock _ctx k ->
     assert lock.locked;
     if Queue.is_empty lock.waiters then begin
@@ -436,46 +433,46 @@ and unlock : !r. mutex ->> !r ctx ->> (unit, !r) cont -[!r]-> unit  =
     end;
     continue k ()
 
-and yield : !r. !r ctx ->> (unit, !r) cont -[!r]-> unit =
+and yield : 'a. ctx ->> unit cont -> unit =
   fun ctx k ->
     enqueue ctx (Cont_unit(k));
     schedule ctx
 
-let never : unit -[!r async]-> 'a =
+let never : unit -[async]-> 'a =
   fun () ->
     perform Async(Never)
 
-let fork : (unit -[!r async | !r]-> 'b) -[!r async]-> 'b ivar =
+let fork : (unit -[async]-> 'b) -[async]-> 'b ivar =
   fun f ->
     perform Async(Fork((), f))
 
-let nfork_map : 'a list ->> f:('a -[!r async | !r]-> 'b) -[!r async]-> 'b ivar list =
+let nfork_map : 'a list ->> f:('a -[async]-> 'b) -[async]-> 'b ivar list =
   fun l ~f ->
     perform Async(NFork(l, f))
 
-let nfork : (unit -[!r async | !r]-> 'a) list -[!r async]-> 'a ivar list =
+let nfork : (unit -[async]-> 'a) list -[async]-> 'a ivar list =
   fun l ->
     perform Async(NFork(l, fun f -> f ()))
 
 let fork_and_join :
-  (unit -[!r async | !r]-> 'a) ->> (unit -[!r async | !r]-> 'b) -[!r async]->
+  (unit -[async]-> 'a) ->> (unit -[async]-> 'b) -[async]->
   'a * 'b =
   fun fa fb ->
     perform Async(Fork_and_join(fa, fb))
 
 let fork_and_join_unit :
-  (unit -[!r async | !r]-> unit) ->> (unit -[!r async | !r]-> 'a)
-    -[!r async]-> 'a =
+  (unit -[async]-> unit) ->> (unit -[async]-> 'a)
+    -[async]-> 'a =
   fun fa fb ->
     snd (perform Async(Fork_and_join(fa, fb)))
 
 let parallel_map :
-  'a list ->> f:('a -[!r async | !r]-> 'b) -[!r async]-> 'b list =
+  'a list ->> f:('a -[async]-> 'b) -[async]-> 'b list =
   fun l ~f ->
     perform Async(Parallel_map(l, f))
 
 let parallel_iter :
-  'a list ->> f:('a -[!r async | !r]-> unit) -[!r async]-> unit =
+  'a list ->> f:('a -[async]-> unit) -[async]-> unit =
   fun l ~f ->
     perform Async(Parallel_iter(l, f))
 
@@ -485,25 +482,25 @@ module Var = struct
 
   let create = Var0.create
 
-  let get : 'a Var0.t -[!r async]-> 'a option =
+  let get : 'a Var0.t -[async]-> 'a option =
     fun t -> perform Async(Get t)
 
-  let get_exn : 'a Var0.t -[!r async]-> 'a =
+  let get_exn : 'a Var0.t -[async]-> 'a =
     fun t -> perform Async(Get_exn t)
 
-  let set : 'a Var0.t ->> 'a ->> (unit -[!r async | !r]-> 'b) -[!r async]-> 'b =
+  let set : 'a Var0.t ->> 'a ->> (unit -[async]-> 'b) -[async]-> 'b =
     fun t x f -> perform Async(Set(t, x, f))
 
 end
 
 let with_error_handler :
-  (unit -[!r async | !r]-> 'a) ->>
-  on_error:(exn -> unit) -[!r async]-> 'a =
+  (unit -[async]-> 'a) ->>
+  on_error:(exn -> unit) -[async]-> 'a =
   fun f ~on_error ->
     perform Async(With_error_handler(f, on_error))
 
 let wait_errors :
-  (unit -[!r async | !r]-> 'a) -[!r async]-> ('a, unit) result =
+  (unit -[async]-> 'a) -[async]-> ('a, unit) result =
   fun f ->
     perform Async(Wait_errors f)
 
@@ -522,8 +519,8 @@ let collect_errors f =
     ~on_error:(fun e l -> e :: l)
 
 let finalize :
-  (unit -[!r async | !r]-> 'a) ->> finally:(unit -[!r async]-> unit)
-  -[!r async]-> 'a =
+  (unit -[async]-> 'a) ->> finally:(unit -[async]-> unit)
+  -[async]-> 'a =
   fun f ~finally ->
     let res = wait_errors f in
     finally ();
@@ -537,10 +534,10 @@ module Ivar = struct
 
   let create () = { state = Empty (Queue.create ()) }
 
-  let fill : 'a ivar ->> 'a  -[!r async]-> unit =
+  let fill : 'a ivar ->> 'a  -[async]-> unit =
     fun t x -> perform Async(Fill(t, x))
 
-  let read : 'a ivar -[!r async]-> 'a =
+  let read : 'a ivar -[async]-> 'a =
     fun t -> perform Async(Read t)
 
 end
@@ -560,7 +557,7 @@ module Mutex = struct
     { locked  = false;
       waiters = Queue.create (); }
 
-  let with_lock : mutex ->> (unit -[!r async | !r]-> 'a) -[!r async]-> 'a =
+  let with_lock : mutex ->> (unit -[async]-> 'a) -[async]-> 'a =
     fun t f ->
       perform Async(Lock t);
       finalize f
@@ -568,7 +565,7 @@ module Mutex = struct
 
 end
 
-let yield : unit -[!r async]-> unit =
+let yield : unit -[async]-> unit =
   fun () -> perform Async(Yield)
 
 exception Never

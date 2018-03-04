@@ -7,7 +7,7 @@ module Jbuilds : sig
   val eval
     :  t
     -> context:Context.t
-    -[!r async]-> (Path.t * Scope_info.t * Stanzas.t) list
+    -[async]-> (Path.t * Scope_info.t * Stanzas.t) list
 end
 
 type conf =

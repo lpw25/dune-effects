@@ -112,7 +112,7 @@ module Unexpanded : sig
     -> Partial.t
 end
 
-val exec : targets:Path.Set.t -> ?context:Context.t -> t -[!r async]-> unit
+val exec : targets:Path.Set.t -> ?context:Context.t -> t -[async]-> unit
 
 (* Return a sandboxed version of an action *)
 val sandbox

@@ -24,7 +24,7 @@ val setup
   -> ?x:string
   -> ?ignore_promoted_rules:bool
   -> unit
-  -[!r async]-> setup
+  -[async]-> setup
 val external_lib_deps
   : ?log:Log.t
   -> packages:string list

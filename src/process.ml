@@ -19,7 +19,7 @@ let accepted_codes : type a b. (a, b) failure_mode -> accepted_codes = function
   | Accept All -> All
 
 let map_result
-  : type a b c. (a, b) failure_mode -> c -> (c -[!r async]-> int) -> f:(unit -> a) -[!r async]-> b
+  : type a b c. (a, b) failure_mode -> c -> (c -[async]-> int) -> f:(unit -> a) -[async]-> b
   = fun mode x t ~f ->
     match mode with
     | Strict   -> ignore(t x); f ()
