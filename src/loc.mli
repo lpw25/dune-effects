@@ -7,10 +7,12 @@ val of_lexbuf : Lexing.lexbuf -> t
 
 exception Error of t * string
 
-val exnf     : t             -> ('a, Format.formatter, unit, exn) format4 -> 'a
-val fail     : t             -> ('a, Format.formatter, unit, 'b ) format4 -> 'a
-val fail_lex : Lexing.lexbuf -> ('a, Format.formatter, unit, 'b ) format4 -> 'a
-val fail_opt : t option      -> ('a, Format.formatter, unit, 'b ) format4 -> 'a
+val exnf : t -> ('a, Format.formatter, unit, exn, ![io | !~]) format4e ~> 'a
+val fail : t -> ('a, Format.formatter, unit, 'b , ![io | !~]) format4e ~> 'a
+val fail_lex :
+  Lexing.lexbuf -> ('a, Format.formatter, unit, 'b , ![io | !~]) format4e ~> 'a
+val fail_opt :
+  t option -> ('a, Format.formatter, unit, 'b , ![io | !~]) format4e ~> 'a
 
 val in_file : string -> t
 
@@ -26,4 +28,4 @@ val pp_file_colon_line : Format.formatter -> t -> unit
 val print : Format.formatter -> t -> unit
 
 (** Prints a warning *)
-val warn : t -> ('a, Format.formatter, unit) format -> 'a
+val warn : t -> ('a, Format.formatter, unit, ![io | !~]) formate ~> 'a

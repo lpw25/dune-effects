@@ -1232,10 +1232,13 @@ module type Gen = sig
   val init : unit -> unit
 end
 
+let gen' sctx =
+  let module M = Gen(struct let sctx = sctx end) in
+  (module M : Gen)
+
 let gen ~contexts ~build_system
       ?(filter_out_optional_stanzas_with_missing_deps=true)
       ?only_packages conf =
-  let open Fiber.O in
   let { Jbuild_load. file_tree; jbuilds; packages; scopes } = conf in
   let packages =
     match only_packages with
@@ -1247,16 +1250,15 @@ let gen ~contexts ~build_system
   let sctxs = Hashtbl.create 4 in
   List.iter contexts ~f:(fun c ->
     Hashtbl.add sctxs c.Context.name (Fiber.Ivar.create ()));
-  let make_sctx (context : Context.t) : _ Fiber.t =
+  let make_sctx (context : Context.t) =
     let host () =
       match context.for_host with
-      | None -> Fiber.return None
+      | None -> None
       | Some h ->
-        Fiber.Ivar.read (Option.value_exn (Hashtbl.find sctxs h.name))
-        >>| fun x -> Some x
+        Some (Fiber.Ivar.read (Option.value_exn (Hashtbl.find sctxs h.name)))
     in
     let stanzas () =
-      Jbuild_load.Jbuilds.eval ~context jbuilds >>| fun stanzas ->
+      let stanzas = Jbuild_load.Jbuilds.eval ~context jbuilds in
       match only_packages with
       | None -> stanzas
       | Some pkgs ->
@@ -1271,7 +1273,7 @@ let gen ~contexts ~build_system
                String_set.mem pkgs package.name
              | _ -> true)))
     in
-    Fiber.fork_and_join host stanzas >>= fun (host, stanzas) ->
+    let (host, stanzas) = Fiber.fork_and_join host stanzas in
     let sctx =
       Super_context.create
         ?host
@@ -1283,12 +1285,11 @@ let gen ~contexts ~build_system
         ~filter_out_optional_stanzas_with_missing_deps
         ~stanzas
     in
-    let module M = Gen(struct let sctx = sctx end) in
-    Fiber.Ivar.fill (Option.value_exn (Hashtbl.find sctxs context.name)) sctx
-    >>| fun () ->
-    (context.name, ((module M : Gen), stanzas))
+    let g = gen' sctx in
+    Fiber.Ivar.fill (Option.value_exn (Hashtbl.find sctxs context.name)) sctx;
+    (context.name, (g, stanzas))
   in
-  Fiber.parallel_map contexts ~f:make_sctx >>| fun l ->
+  let l = Fiber.parallel_map contexts ~f:make_sctx in
   let map = String_map.of_list_exn l in
   Build_system.set_rule_generators build_system
     (String_map.map map ~f:(fun ((module M : Gen), _) -> M.gen_rules));

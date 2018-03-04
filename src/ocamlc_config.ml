@@ -1,5 +1,4 @@
 open Import
-open Fiber.O
 
 type t =
   { bindings: string String_map.t
@@ -14,8 +13,9 @@ let sexp_of_t t =
   string_map Sexp.atom_or_quoted_string t.bindings
 
 let read ~ocamlc ~env =
-  Process.run_capture_lines ~env Strict (Path.to_string ocamlc) ["-config"]
-  >>| fun lines ->
+  let lines =
+    Process.run_capture_lines ~env Strict (Path.to_string ocamlc) ["-config"]
+  in
   List.map lines ~f:(fun line ->
     match String.index line ':' with
     | Some i ->

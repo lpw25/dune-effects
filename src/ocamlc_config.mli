@@ -1,9 +1,11 @@
+open Import
+
 (** Output of [ocamlc -config] *)
 type t
 
 val sexp_of_t : t -> Sexp.t
 
-val read : ocamlc:Path.t -> env:string array -> t Fiber.t
+val read : ocamlc:Path.t -> env:string array -[!r async]-> t
 
 (** Used to pass these settings to jbuild files using the OCaml syntax *)
 val ocaml_value : t -> string

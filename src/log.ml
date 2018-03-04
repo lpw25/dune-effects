@@ -34,21 +34,29 @@ let info_internal { ppf; display; _ } str =
   write ppf;
   if display = Verbose then print_to_console (Format.asprintf "%t" write)
 
+(* TODO : Fix bug and remove this line *)
+let info_internal : real -> String.t -> unit = info_internal
+
 let info t str =
   match t with
   | None -> ()
   | Some t -> info_internal t str
 
-let infof t fmt =
+let infof : effect foo. real option ->>
+           ('a, Format.formatter, unit, unit, ![global state | .. as foo]) format4e -[.. as foo]-> 'a =
+      fun t fmt ->
   match t with
   | None -> Format.ikfprintf ignore Format.str_formatter fmt
   | Some t ->
-    Format.kfprintf
-      (fun ppf ->
+      let bar : Format.formatter -[.. as foo]-> _ =
+        fun ppf ->
          Format.pp_print_flush ppf ();
          let s = Buffer.contents t.buf in
          Buffer.clear t.buf;
-         info_internal t s)
+         info_internal t s
+      in
+    Format.kfprintf
+      bar
       t.ppf
       fmt
 

@@ -587,8 +587,6 @@ let chdirs =
   in
   fun t -> loop Path.Set.empty t
 
-open Fiber.O
-
 let get_std_output : _ -> Process.std_output_to = function
   | None          -> Terminal
   | Some (fn, oc) -> Opened_file { filename = fn; tail = false; desc = Channel oc }
@@ -725,10 +723,9 @@ let exec_run ~ectx ~dir ~env_extra ~stdout_to ~stderr_to prog args =
     (Path.reach_for_running ~from:dir prog) args
 
 let exec_echo stdout_to str =
-  Fiber.return
-    (match stdout_to with
-     | None -> print_string str; flush stdout
-     | Some (_, oc) -> output_string oc str)
+  match stdout_to with
+  | None -> print_string str; flush stdout
+  | Some (_, oc) -> output_string oc str
 
 let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
   match t with
@@ -742,8 +739,7 @@ let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
     exec t ~ectx ~dir ~stdout_to ~stderr_to
       ~env_extra:(Env_var_map.add env_extra var value)
   | Redirect (Stdout, fn, Echo s) ->
-    Io.write_file (Path.to_string fn) s;
-    Fiber.return ()
+    Io.write_file (Path.to_string fn) s
   | Redirect (outputs, fn, t) ->
     redirect ~ectx ~dir outputs fn t ~env_extra ~stdout_to ~stderr_to
   | Ignore (outputs, t) ->
@@ -758,11 +754,9 @@ let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
         | None -> stdout
         | Some (_, oc) -> oc
       in
-      Io.copy_channels ic oc);
-    Fiber.return ()
+      Io.copy_channels ic oc)
   | Copy (src, dst) ->
-    Io.copy_file ~src:(Path.to_string src) ~dst:(Path.to_string dst);
-    Fiber.return ()
+    Io.copy_file ~src:(Path.to_string src) ~dst:(Path.to_string dst)
   | Symlink (src, dst) ->
     if Sys.win32 then
       Io.copy_file ~src:(Path.to_string src) ~dst:(Path.to_string dst)
@@ -783,8 +777,7 @@ let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
         end
       | exception _ ->
         Unix.symlink src dst
-    end;
-    Fiber.return ()
+    end
   | Copy_and_add_line_directive (src, dst) ->
     Io.with_file_in (Path.to_string src) ~f:(fun ic ->
       Io.with_file_out (Path.to_string dst) ~f:(fun oc ->
@@ -796,8 +789,7 @@ let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
             ""
         in
         Printf.fprintf oc "#%s 1 %S\n" directive (Path.to_string fn);
-        Io.copy_channels ic oc));
-    Fiber.return ()
+        Io.copy_channels ic oc))
   | System cmd ->
     let path, arg =
       Utils.system_shell_exn ~needed_to:"interpret (system ...) actions"
@@ -808,14 +800,11 @@ let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
       (Utils.bash_exn ~needed_to:"interpret (bash ...) actions")
       ["-e"; "-u"; "-o"; "pipefail"; "-c"; cmd]
   | Write_file (fn, s) ->
-    Io.write_file (Path.to_string fn) s;
-    Fiber.return ()
+    Io.write_file (Path.to_string fn) s
   | Rename (src, dst) ->
-    Unix.rename (Path.to_string src) (Path.to_string dst);
-    Fiber.return ()
+    Unix.rename (Path.to_string src) (Path.to_string dst)
   | Remove_tree path ->
-    Path.rm_rf path;
-    Fiber.return ()
+    Path.rm_rf path
   | Mkdir path ->
     (match Path.kind path with
      | External _ ->
@@ -824,8 +813,7 @@ let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
          "(mkdir ...) is not supported for paths outside of the workspace"
          [ "mkdir", Path.sexp_of_t path ]
      | Local path ->
-       Path.Local.mkdir_p path);
-    Fiber.return ()
+       Path.Local.mkdir_p path)
   | Digest_files paths ->
     let s =
       let data =
@@ -839,7 +827,7 @@ let rec exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
   | Diff { optional; file1; file2 } ->
     if (optional && not (Path.exists file1 && Path.exists file2)) ||
        Io.compare_files (Path.to_string file1) (Path.to_string file2) = Eq then
-      Fiber.return ()
+      ()
     else begin
       let is_copied_from_source_tree file =
         match Path.drop_build_context file with
@@ -866,17 +854,16 @@ and redirect outputs fn t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
     | Stderr -> (stdout_to, out)
     | Outputs -> (out, out)
   in
-  exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to >>| fun () ->
+  exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to;
   close_out oc
 
 and exec_list l ~ectx ~dir ~env_extra ~stdout_to ~stderr_to =
   match l with
-  | [] ->
-    Fiber.return ()
+  | [] -> ()
   | [t] ->
     exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to
   | t :: rest ->
-    exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to >>= fun () ->
+    exec t ~ectx ~dir ~env_extra ~stdout_to ~stderr_to;
     exec_list rest ~ectx ~dir ~env_extra ~stdout_to ~stderr_to
 
 let exec ~targets ?context t =

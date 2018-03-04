@@ -1,5 +1,4 @@
 open Import
-open Fiber.O
 
 module Pset  = Path.Set
 module Pmap  = Path.Map
@@ -75,7 +74,7 @@ module Dependency_path = struct
          (List.map loop ~f:Path.to_string))
 
   let push requested_file ~targets ~f =
-    Fiber.Var.get var >>= fun x ->
+    let x = Fiber.Var.get var in
     let t = Option.value x ~default:empty in
     if Pset.mem t.targets_seen requested_file then
       dependency_cycle requested_file t.dependency_path;
@@ -90,15 +89,15 @@ module Dependency_path = struct
     let on_error exn =
       Dep_path.reraise exn (Path requested_file)
     in
-    Fiber.Var.set var t (Fiber.with_error_handler f ~on_error)
+    Fiber.Var.set var t (fun () -> Fiber.with_error_handler f ~on_error)
 end
 
 module Exec_status = struct
   type rule_evaluation = (Action.t * Pset.t) Fiber.Future.t
   type rule_execution = unit Fiber.Future.t
 
-  type eval_rule = unit -> (Action.t * Pset.t) Fiber.t
-  type exec_rule = rule_evaluation -> unit Fiber.t
+  type eval_rule = unit -[![] async]-> Action.t * Pset.t
+  type exec_rule = rule_evaluation -[![] async]-> unit
 
   module Evaluating_rule = struct
     type t =
@@ -649,22 +648,22 @@ let rec compile_rule t ?(copy_source=false) pre_rule =
             ~file_tree:t.file_tree
   in
 
-  let eval_rule () =
+  let eval_rule : Exec_status.eval_rule =
+    fun () ->
     t.hook Rule_started;
-    wait_for_deps t rule_deps
-    >>| fun () ->
+    wait_for_deps t rule_deps;
     Build_exec.exec t build ()
   in
   let exec_rule (rule_evaluation : Exec_status.rule_evaluation) =
-    Fiber.fork_and_join_unit
-      (fun () ->
-         wait_for_deps t static_deps)
-      (fun () ->
-         Fiber.Future.wait rule_evaluation >>= fun (action, dyn_deps) ->
-         wait_for_deps t (Pset.diff dyn_deps static_deps)
-         >>| fun () ->
-         (action, dyn_deps))
-    >>= fun (action, dyn_deps) ->
+    let (action, dyn_deps) =
+      Fiber.fork_and_join_unit
+        (fun () ->
+           wait_for_deps t static_deps)
+        (fun () ->
+           let (action, dyn_deps) = Fiber.Future.wait rule_evaluation in
+           wait_for_deps t (Pset.diff dyn_deps static_deps);
+           (action, dyn_deps))
+    in
     make_local_parent_dirs t targets ~map_path:(fun x -> x);
     let all_deps = Pset.union static_deps dyn_deps in
     let all_deps_as_list = Pset.to_list all_deps in
@@ -729,7 +728,7 @@ let rec compile_rule t ?(copy_source=false) pre_rule =
       in
       make_local_dirs t (Action.chdirs action);
       with_locks locks ~f:(fun () ->
-        Action.exec ?context ~targets action) >>| fun () ->
+        Action.exec ?context ~targets action);
       Option.iter sandbox_dir ~f:Path.rm_rf;
       (* All went well, these targets are no longer pending *)
       pending_targets := Pset.diff !pending_targets targets;
@@ -747,7 +746,6 @@ let rec compile_rule t ?(copy_source=false) pre_rule =
       t.hook Rule_completed
     end else begin
       t.hook Rule_completed;
-      Fiber.return ()
     end
   in
   let rule =
@@ -778,8 +776,10 @@ and setup_copy_rules t ~ctx_dir ~non_target_source_files =
        should allow it on a case-by-case basis though. *)
     compile_rule t (Pre_rule.make build) ~copy_source:true)
 
-and load_dir   t ~dir = ignore (load_dir_and_get_targets t ~dir : Pset.t)
-and targets_of t ~dir =         load_dir_and_get_targets t ~dir
+and load_dir : 'a. t ->> dir:Path.t -> unit =
+  fun t ~dir -> ignore (load_dir_and_get_targets t ~dir : Pset.t)
+and targets_of : 'a. t ->> dir:Path.t -> Pset.t =
+  fun t ~dir -> load_dir_and_get_targets t ~dir
 
 and load_dir_and_get_targets t ~dir =
   match get_dir_status t ~dir with
@@ -1010,7 +1010,7 @@ and wait_for_file t fn =
       | Some file -> wait_for_file_found fn file
       | None -> no_rule_found t fn
     end else if Path.exists fn then
-      Fiber.return ()
+      ()
     else
       die "File unavailable: %s" (Path.to_string_maybe_quoted fn)
 
@@ -1018,10 +1018,8 @@ and wait_for_file_found fn (File_spec.T file) =
   Dependency_path.push fn ~targets:file.rule.targets ~f:(fun () ->
     match file.rule.exec with
     | Not_started { eval_rule; exec_rule } ->
-      Fiber.fork eval_rule
-      >>= fun rule_evaluation ->
-      Fiber.fork (fun () -> exec_rule rule_evaluation)
-      >>= fun rule_execution ->
+      let rule_evaluation = Fiber.fork eval_rule in
+      let rule_execution = Fiber.fork (fun () -> exec_rule rule_evaluation) in
       file.rule.exec <-
         Running { rule_evaluation
                 ; rule_execution
@@ -1030,8 +1028,7 @@ and wait_for_file_found fn (File_spec.T file) =
     | Running { rule_execution; _ } ->
       Fiber.Future.wait rule_execution
     | Evaluating_rule { rule_evaluation; exec_rule } ->
-      Fiber.fork (fun () -> exec_rule rule_evaluation)
-      >>= fun rule_execution ->
+      let rule_execution = Fiber.fork (fun () -> exec_rule rule_evaluation) in
       file.rule.exec <-
         Running { rule_evaluation
                 ; rule_execution
@@ -1162,8 +1159,7 @@ let eval_request t ~request ~process_target =
   Fiber.fork_and_join_unit
     (fun () -> process_targets static_deps)
     (fun () ->
-       wait_for_deps t rule_deps
-       >>= fun () ->
+       wait_for_deps t rule_deps;
        let dyn_deps = Build_exec.exec_nop t request () in
        process_targets (Pset.diff dyn_deps static_deps))
 
@@ -1289,51 +1285,49 @@ let build_rules_internal ?(recursive=false) t ~request =
     match Hashtbl.find t.files fn with
     | Some file ->
       file_found fn file
-    | None ->
-      Fiber.return ()
+    | None -> ()
   and file_found fn (File_spec.T { rule = ir; _ }) =
     if Id_set.mem !rules_seen ir.id then
-      Fiber.return ()
+      ()
     else begin
       rules_seen := Id_set.add !rules_seen ir.id;
-      (match ir.exec with
-       | Running { rule_evaluation; _ } | Evaluating_rule { rule_evaluation; _ } ->
-         Fiber.return rule_evaluation
-       | Not_started { eval_rule; exec_rule } ->
-         Fiber.fork (fun () ->
-           Dependency_path.push fn ~targets:ir.targets ~f:eval_rule)
-         >>| fun rule_evaluation ->
-         ir.exec <- Evaluating_rule { rule_evaluation
-                                    ; exec_rule
-                                    };
-         rule_evaluation)
-      >>= fun rule_evaluation ->
-      Fiber.fork (fun () ->
-        Fiber.Future.wait rule_evaluation
-        >>| fun (action, dyn_deps) ->
-        { Rule.
-          id      = ir.id
-        ; deps    = Pset.union ir.static_deps dyn_deps
-        ; targets = ir.targets
-        ; context = ir.context
-        ; action  = action
-        })
-      >>= fun rule ->
+      let rule_evaluation =
+        match ir.exec with
+         | Running { rule_evaluation; _ } | Evaluating_rule { rule_evaluation; _ } ->
+           rule_evaluation
+         | Not_started { eval_rule; exec_rule } ->
+           let rule_evaluation =
+             Fiber.fork (fun () ->
+               Dependency_path.push fn ~targets:ir.targets ~f:eval_rule)
+           in
+           ir.exec <- Evaluating_rule { rule_evaluation
+                                      ; exec_rule
+                                      };
+           rule_evaluation
+      in
+      let rule =
+        Fiber.fork (fun () ->
+          let (action, dyn_deps) = Fiber.Future.wait rule_evaluation in
+          { Rule.
+            id      = ir.id
+          ; deps    = Pset.union ir.static_deps dyn_deps
+          ; targets = ir.targets
+          ; context = ir.context
+          ; action  = action
+          })
+      in
       rules := rule :: !rules;
-      if not recursive then
-        Fiber.return ()
-      else
-        Fiber.Future.wait rule >>= fun rule ->
+      if recursive then begin
+        let rule = Fiber.Future.wait rule in
         Fiber.parallel_iter (Pset.to_list rule.deps) ~f:loop
+      end
     end
   in
   let targets = ref Pset.empty in
   eval_request t ~request ~process_target:(fun fn ->
     targets := Pset.add !targets fn;
-    loop fn)
-  >>= fun () ->
-  Fiber.all (List.map !rules ~f:Fiber.Future.wait)
-  >>| fun rules ->
+    loop fn);
+  let rules = List.map !rules ~f:Fiber.Future.wait in
   let rules =
     List.fold_left rules ~init:Pmap.empty ~f:(fun acc (r : Rule.t) ->
       Pset.fold r.targets ~init:acc ~f:(fun fn acc ->

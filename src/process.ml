@@ -1,5 +1,4 @@
 open Import
-open Fiber.O
 
 type accepted_codes =
   | These of int list
@@ -20,12 +19,12 @@ let accepted_codes : type a b. (a, b) failure_mode -> accepted_codes = function
   | Accept All -> All
 
 let map_result
-  : type a b. (a, b) failure_mode -> int Fiber.t -> f:(unit -> a) -> b Fiber.t
-  = fun mode t ~f ->
+  : type a b c. (a, b) failure_mode -> c -> (c -[!r async]-> int) -> f:(unit -> a) -[!r async]-> b
+  = fun mode x t ~f ->
     match mode with
-    | Strict   -> t >>| fun _ -> f ()
+    | Strict   -> ignore(t x); f ()
     | Accept _ ->
-      t >>| function
+      match t x with
       | 0 -> Ok (f ())
       | n -> Error n
 
@@ -211,8 +210,7 @@ let gen_id =
 
 let run_internal ?dir ?(stdout_to=Terminal) ?(stderr_to=Terminal) ?env ~purpose
       fail_mode prog args =
-  Scheduler.wait_for_available_job ()
-  >>= fun scheduler ->
+  let scheduler = Scheduler.wait_for_available_job () in
   let display = Scheduler.display scheduler in
   let dir =
     match dir with
@@ -254,8 +252,7 @@ let run_internal ?dir ?(stdout_to=Terminal) ?(stderr_to=Terminal) ?env ~purpose
   Option.iter to_close ~f:Unix.close;
   close_std_output close_stdout;
   close_std_output close_stderr;
-  Scheduler.wait_for_process pid
-  >>| fun status ->
+  let status = Scheduler.wait_for_process pid in
   let output =
     match output_filename with
     | None -> ""
@@ -319,14 +316,14 @@ let run_internal ?dir ?(stdout_to=Terminal) ?(stderr_to=Terminal) ?env ~purpose
 
 let run ?dir ?stdout_to ?stderr_to ?env ?(purpose=Internal_job) fail_mode
       prog args =
-  map_result fail_mode
-    (run_internal ?dir ?stdout_to ?stderr_to ?env ~purpose fail_mode prog args)
+  map_result fail_mode args
+    (run_internal ?dir ?stdout_to ?stderr_to ?env ~purpose fail_mode prog)
     ~f:ignore
 
 let run_capture_gen ?dir ?env ?(purpose=Internal_job) fail_mode prog args ~f =
   let fn = Temp.create "jbuild" ".output" in
-  map_result fail_mode
-    (run_internal ?dir ~stdout_to:(File fn) ?env ~purpose fail_mode prog args)
+  map_result fail_mode args
+    (run_internal ?dir ~stdout_to:(File fn) ?env ~purpose fail_mode prog)
     ~f:(fun () ->
       let x = f fn in
       Temp.destroy fn;

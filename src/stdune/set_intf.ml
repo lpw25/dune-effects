@@ -14,13 +14,13 @@ module type S = sig
   val compare        : t -> t -> Ordering.t
   val equal          : t -> t -> bool
   val is_subset      : t -> of_:t -> bool
-  val iter           : t -> f:(elt -> unit) -> unit
-  val map            : t -> f:(elt -> elt) -> t
-  val fold           : t -> init:'a -> f:(elt -> 'a -> 'a) -> 'a
-  val for_all        : t -> f:(elt -> bool) -> bool
-  val exists         : t -> f:(elt -> bool) -> bool
-  val filter         : t -> f:(elt -> bool) -> t
-  val partition      : t -> f:(elt -> bool) -> t * t
+  val iter           : t -> f:(elt ~> unit) ~> unit
+  val map            : t -> f:(elt ~> elt) ~> t
+  val fold           : t -> init:'a -> f:(elt ~> 'a ~> 'a) ~> 'a
+  val for_all        : t -> f:(elt ~> bool) ~> bool
+  val exists         : t -> f:(elt ~> bool) ~> bool
+  val filter         : t -> f:(elt ~> bool) ~> t
+  val partition      : t -> f:(elt ~> bool) ~> t * t
   val cardinal       : t -> int
   val min_elt        : t -> elt option
   val max_elt        : t -> elt option

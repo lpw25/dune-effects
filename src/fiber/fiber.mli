@@ -5,7 +5,7 @@
 (** Type of asynchronous operations  *)
 type ('a, !r) op
 
-effect !r async = ![ Async : ('a, !r) op -> 'a ]
+effect !r async = ![ Async : 'a. ('a, !r) op -> 'a ]
 
 (** {1 Forking execution} *)
 
@@ -116,9 +116,9 @@ end
     called.
 *)
 val with_error_handler
-  :  (unit -[!r async | !r]-> 'a t)
+  :  (unit -[!r async | !r]-> 'a)
   -> on_error:(exn -> unit)
-  -[!r async]-> 'a t
+  -[!r async]-> 'a
 
 (** If [t] completes without raising, then [wait_errors t] is the same as [t () >>| fun x
     -> Ok x]. However, if the execution of [t] is aborted by an exception, then
@@ -142,7 +142,7 @@ val with_error_handler
          raise Exit)
     }]
 *)
-val wait_errors : 'a t -[!r async]-> ('a, unit) Result.t t
+val wait_errors : (unit -[!r async | !r]-> 'a)  -[!r async]-> ('a, unit) Result.t
 
 (** [fold_errors f ~init ~on_error] calls [on_error] for every exception raised during the
     execution of [f]. This include exceptions raised when calling [f ()] or during the
@@ -150,10 +150,10 @@ val wait_errors : 'a t -[!r async]-> ('a, unit) Result.t t
 
     Exceptions raised by [on_error] are passed on to the parent error handler. *)
 val fold_errors
-  :  (unit -[!r async | !r]-> 'a t)
+  :  (unit -[!r async | !r]-> 'a)
   -> init:'b
   -> on_error:(exn -> 'b -> 'b)
-  -[!r async]-> ('a, 'b) Result.t t
+  -[!r async]-> ('a, 'b) Result.t
 
 (** [collect_errors f] is:
 
@@ -164,15 +164,15 @@ val fold_errors
     ]}
 *)
 val collect_errors
-  :  (unit -[!r async | !r]-> 'a t)
-  -[!r async]-> ('a, exn list) Result.t t
+  :  (unit -[!r async | !r]-> 'a)
+  -[!r async]-> ('a, exn list) Result.t
 
 (** [finalize f ~finally] runs [finally] after [f ()] has terminated,
     whether it fails or succeeds. *)
 val finalize
-  :  (unit -[!r async | !r]-> 'a t)
-  -> finally:(unit -> unit t)
-  -[!r async]-> 'a t
+  :  (unit -[!r async | !r]-> 'a)
+  -> finally:(unit -[!r async]-> unit)
+  -[!r async]-> 'a
 
 (** {1 Synchronization} *)
 

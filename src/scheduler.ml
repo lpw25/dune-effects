@@ -1,5 +1,4 @@
 open Import
-open Fiber.O
 
 type running_job =
   { pid  : int
@@ -92,13 +91,12 @@ let print t msg =
 let t_var : t Fiber.Var.t = Fiber.Var.create ()
 
 let set_status_line_generator f =
-  Fiber.Var.get_exn t_var >>| fun t ->
+  let t = Fiber.Var.get_exn t_var in
   t.gen_status_line <- f
 
 let wait_for_available_job () =
-  Fiber.Var.get_exn t_var >>= fun t ->
-  if Running_jobs.count () < t.concurrency then
-    Fiber.return t
+  let t = Fiber.Var.get_exn t_var in
+  if Running_jobs.count () < t.concurrency then t
   else begin
     let ivar = Fiber.Ivar.create () in
     Queue.push ivar t.waiting_for_available_job;
@@ -111,13 +109,11 @@ let wait_for_process pid =
   Fiber.Ivar.read ivar
 
 let rec go_rec t =
-  Fiber.yield ()
-  >>= fun () ->
+  Fiber.yield ();
   let count = Running_jobs.count () in
   if count = 0 then begin
     hide_status_line t.status_line;
-    flush stderr;
-    Fiber.return ()
+    flush stderr
   end else begin
     if t.display = Progress then begin
       match t.gen_status_line () with
@@ -134,13 +130,9 @@ let rec go_rec t =
         t.status_line <- status_line;
     end;
     let job, status = Running_jobs.wait () in
-    (if not (Queue.is_empty t.waiting_for_available_job) then
-       Fiber.Ivar.fill (Queue.pop t.waiting_for_available_job) t
-     else
-       Fiber.return ())
-    >>= fun () ->
-    Fiber.Ivar.fill job.ivar status
-    >>= fun () ->
+    if not (Queue.is_empty t.waiting_for_available_job) then
+       Fiber.Ivar.fill (Queue.pop t.waiting_for_available_job) t;
+    Fiber.Ivar.fill job.ivar status;
     go_rec t
   end
 
@@ -162,11 +154,12 @@ let go ?(log=Log.no_log) ?(config=Config.default)
     }
   in
   printer := print t;
-  let fiber =
+  let fiber () =
     Fiber.Var.set t_var t
-      (Fiber.with_error_handler (fun () -> fiber) ~on_error:Report_error.report)
+      (fun () ->
+        Fiber.with_error_handler fiber ~on_error:Report_error.report)
   in
   Fiber.run
-    (Fiber.fork_and_join_unit
-       (fun () -> go_rec t)
-       (fun () -> fiber))
+    (fun () ->
+      Fiber.fork_and_join_unit
+        (fun () -> go_rec t) fiber) ()

@@ -25,16 +25,16 @@ exception Already_reported
 
 (* CR-soon diml: Rename to [user_errorf]. *)
 (** Raise a [Fatal_error] exception *)
-val die : ('a, Format.formatter, unit, 'b) format4 -> 'a
+val die : ('a, Format.formatter, unit, 'b, ![io | !~]) format4e ~> 'a
 
 (** Raise a [Code_error] exception *)
-val code_errorf : ('a, Format.formatter, unit, 'b) format4 -> 'a
+val code_errorf : ('a, Format.formatter, unit, 'b, ![io | !~]) format4e ~> 'a
 
 (**/**)
 (* Referenced in Ansi_color and Report_error *)
 val err_buf : Buffer.t
 val err_ppf : Format.formatter
 val kerrf
-  :  ('a, Format.formatter, unit, 'b) format4
+  :  ('a, Format.formatter, unit, 'b, ![io | !~]) format4e
   -> f:(string -> 'b)
-  -> 'a
+  ~> 'a

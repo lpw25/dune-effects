@@ -24,7 +24,7 @@ val setup
   -> ?x:string
   -> ?ignore_promoted_rules:bool
   -> unit
-  -> setup Fiber.t
+  -[!r async]-> setup
 val external_lib_deps
   : ?log:Log.t
   -> packages:string list

@@ -134,3 +134,5 @@ end
 (* This is ugly *)
 let printer = ref (Printf.eprintf "%s%!")
 let print_to_console s = !printer s
+
+effect !r async = !r Fiber.async

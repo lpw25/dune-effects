@@ -1,5 +1,4 @@
 open Import
-open Fiber.O
 
 type setup =
   { build_system : Build_system.t
@@ -48,10 +47,11 @@ let setup ?(log=Log.no_log)
         }
   in
 
-  Fiber.parallel_map workspace.contexts ~f:(fun ctx_def ->
-    let name = Workspace.Context.name ctx_def in
-    Context.create ctx_def ~merlin:(workspace.merlin_context = Some name) ~use_findlib)
-  >>= fun contexts ->
+  let contexts =
+    Fiber.parallel_map workspace.contexts ~f:(fun ctx_def ->
+      let name = Workspace.Context.name ctx_def in
+      Context.create ctx_def ~merlin:(workspace.merlin_context = Some name) ~use_findlib)
+  in
   let contexts = List.concat contexts in
   List.iter contexts ~f:(fun (ctx : Context.t) ->
     Log.infof log "@[<1>Jbuilder context:@,%a@]@." Sexp.pp (Context.sexp_of_t ctx));
@@ -68,41 +68,42 @@ let setup ?(log=Log.no_log)
   let build_system =
     Build_system.create ~contexts ~file_tree:conf.file_tree ~hook
   in
-  Gen_rules.gen conf
-    ~build_system
-    ~contexts
-    ?only_packages
-    ?filter_out_optional_stanzas_with_missing_deps
-  >>= fun stanzas ->
-  Scheduler.set_status_line_generator gen_status_line
-  >>>
-  Fiber.return
-    { build_system
-    ; stanzas
-    ; contexts
-    ; packages = conf.packages
-    ; file_tree = conf.file_tree
-    }
+  let stanzas =
+    Gen_rules.gen conf
+      ~build_system
+      ~contexts
+      ?only_packages
+      ?filter_out_optional_stanzas_with_missing_deps
+  in
+  Scheduler.set_status_line_generator gen_status_line;
+  { build_system
+  ; stanzas
+  ; contexts
+  ; packages = conf.packages
+  ; file_tree = conf.file_tree
+  }
 
 let external_lib_deps ?log ~packages () =
   Scheduler.go ?log
-    (setup () ~filter_out_optional_stanzas_with_missing_deps:false
-     >>| fun setup ->
-     let install_files =
-       List.map packages ~f:(fun pkg ->
-         match package_install_file setup pkg with
-         | Ok path -> path
-         | Error () -> die "Unknown package %S" pkg)
-     in
-     match String_map.find setup.stanzas "default" with
-     | None -> die "You need to set a default context to use external-lib-deps"
-     | Some stanzas ->
-       let internals = Jbuild.Stanzas.lib_names stanzas in
-       Path.Map.map
-         (Build_system.all_lib_deps setup.build_system
-            ~request:(Build.paths install_files))
-         ~f:(String_map.filteri ~f:(fun name _ ->
-           not (String_set.mem internals name))))
+    (fun () ->
+      let setup =
+        setup () ~filter_out_optional_stanzas_with_missing_deps:false
+      in
+      let install_files =
+        List.map packages ~f:(fun pkg ->
+          match package_install_file setup pkg with
+          | Ok path -> path
+          | Error () -> die "Unknown package %S" pkg)
+      in
+      match String_map.find setup.stanzas "default" with
+      | None -> die "You need to set a default context to use external-lib-deps"
+      | Some stanzas ->
+        let internals = Jbuild.Stanzas.lib_names stanzas in
+        Path.Map.map
+          (Build_system.all_lib_deps setup.build_system
+             ~request:(Build.paths install_files))
+          ~f:(String_map.filteri ~f:(fun name _ ->
+            not (String_set.mem internals name))))
 
 let ignored_during_bootstrap =
   Path.Set.of_list
@@ -117,7 +118,7 @@ let bootstrap () =
   let main () =
     let anon s = raise (Arg.Bad (Printf.sprintf "don't know what to do with %s\n" s)) in
     let subst () =
-      Scheduler.go (Watermarks.subst () ~name:"jbuilder");
+      Scheduler.go (fun () -> Watermarks.subst () ~name:"jbuilder");
       exit 0
     in
     let display = ref None in
@@ -160,13 +161,15 @@ let bootstrap () =
     in
     let log = Log.create ~display:config.display () in
     Scheduler.go ~log ~config
-      (setup ~log ~workspace:{ merlin_context = Some "default"
-                             ; contexts = [Default [Native]] }
-         ~use_findlib:false
-         ~extra_ignored_subtrees:ignored_during_bootstrap
-         ()
-       >>= fun { build_system = bs; _ } ->
-       Build_system.do_build bs
+      (fun () ->
+        let { build_system = bs; _ } =
+          setup ~log ~workspace:{ merlin_context = Some "default"
+                                ; contexts = [Default [Native]] }
+                ~use_findlib:false
+                ~extra_ignored_subtrees:ignored_during_bootstrap
+                ()
+        in
+        Build_system.do_build bs
          ~request:(Build.path (Path.of_string "_build/default/jbuilder.install")))
   in
   try

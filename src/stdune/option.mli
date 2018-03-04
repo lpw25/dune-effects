@@ -5,14 +5,14 @@ type 'a t = 'a option =
   | Some of 'a
 
 module O : sig
-  val (>>|) : 'a t -> ('a -> 'b  ) -> 'b t
-  val (>>=) : 'a t -> ('a -> 'b t) -> 'b t
+  val (>>|) : 'a t -> ('a ~> 'b  ) ~> 'b t
+  val (>>=) : 'a t -> ('a ~> 'b t) ~> 'b t
 end
 
-val map  : 'a t -> f:('a -> 'b  ) -> 'b t
-val bind : 'a t -> f:('a -> 'b t) -> 'b t
+val map  : 'a t -> f:('a ~> 'b  ) ~> 'b t
+val bind : 'a t -> f:('a ~> 'b t) ~> 'b t
 
-val iter : 'a t -> f:('a -> unit) -> unit
+val iter : 'a t -> f:('a ~> unit) ~> unit
 
 val value : 'a t -> default:'a -> 'a
 val value_exn : 'a t -> 'a

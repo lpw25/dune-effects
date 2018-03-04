@@ -52,7 +52,7 @@ let inspect_path file_tree path =
         None
 
 let static_deps t ~all_targets ~file_tree =
-  let rec loop : type a b. (a, b) t -> Static_deps.t -> Static_deps.t = fun t acc ->
+  let rec loop : type a b. (a, b) t -> Static_deps.t ~> Static_deps.t = fun t acc ->
     match t with
     | Arr _ -> acc
     | Targets _ -> acc

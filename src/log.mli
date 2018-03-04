@@ -8,7 +8,7 @@ val create : ?display:Config.Display.t -> unit -> t
 
 (** Print an information message in the log *)
 val info  : t -> string -> unit
-val infof : t -> ('a, Format.formatter, unit, unit) format4 -> 'a
+val infof : t -> ('a, Format.formatter, unit, unit, ![io | !~]) format4e ~> 'a
 
 (** Print an executed command in the log *)
 val command

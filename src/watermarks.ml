@@ -1,8 +1,6 @@
 open Import
 open Jbuilder_opam_file_format
 
-open Fiber.O
-
 let is_a_source_file fn =
   match Filename.extension fn with
   | ".flv"
@@ -205,27 +203,25 @@ let subst_git ?name () =
     | Some x -> Path.to_string x
     | None -> Utils.program_not_found "git"
   in
-  Fiber.fork_and_join
-    (fun () ->
-       Fiber.fork_and_join
-         (fun () ->
+  let ((version, commit), files) =
+    Fiber.fork_and_join
+      (fun () ->
+        Fiber.fork_and_join
+          (fun () ->
             Process.run_capture Strict git ["describe"; "--always"; "--dirty"])
-         (fun () ->
+          (fun () ->
             Process.run_capture Strict git ["rev-parse"; rev]))
-    (fun () ->
-       Process.run_capture_lines Strict git ["ls-tree"; "-r"; "--name-only"; rev])
-  >>= fun ((version, commit), files) ->
+      (fun () ->
+        Process.run_capture_lines Strict git ["ls-tree"; "-r"; "--name-only"; rev])
+  in
   let version = String.trim version in
   let commit  = String.trim commit  in
   let name = get_name ~files ?name () in
   let watermarks = make_watermark_map ~name ~version ~commit in
   List.iter files ~f:(fun fn ->
     if is_a_source_file fn then
-      subst_file fn ~map:watermarks);
-  Fiber.return ()
+      subst_file fn ~map:watermarks)
 
 let subst ?name () =
   if Sys.file_exists ".git" then
     subst_git ?name ()
-  else
-    Fiber.return ()

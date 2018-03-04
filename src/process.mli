@@ -46,7 +46,7 @@ val run
   -> (unit, 'a) failure_mode
   -> string
   -> string list
-  -> 'a Fiber.t
+  -[!r async]-> 'a
 
 (** Run a command and capture its output *)
 val run_capture
@@ -56,7 +56,7 @@ val run_capture
   -> (string, 'a) failure_mode
   -> string
   -> string list
-  -> 'a Fiber.t
+  -[!r async]-> 'a
 val run_capture_line
   :  ?dir:string
   -> ?env:string array
@@ -64,7 +64,7 @@ val run_capture_line
   -> (string, 'a) failure_mode
   -> string
   -> string list
-  -> 'a Fiber.t
+  -[!r async]-> 'a
 val run_capture_lines
   :  ?dir:string
   -> ?env:string array
@@ -72,5 +72,5 @@ val run_capture_lines
   -> (string list, 'a) failure_mode
   -> string
   -> string list
-  -> 'a Fiber.t
+  -[!r async]-> 'a
 

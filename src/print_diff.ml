@@ -1,7 +1,5 @@
 open Import
 
-open Fiber.O
-
 let print path1 path2 =
   let dir, file1, file2 =
     match
@@ -25,8 +23,7 @@ let print path1 path2 =
     | Some prog ->
       Format.eprintf "%a@?" Loc.print loc;
       Process.run ~dir Strict (Path.to_string prog)
-        ["-u"; file1; file2]
-      >>= fun () ->
+        ["-u"; file1; file2];
       fallback ()
   in
   match !Clflags.diff_command with
@@ -35,8 +32,7 @@ let print path1 path2 =
     let cmd =
       sprintf "%s %s %s" cmd (quote_for_shell file1) (quote_for_shell file2)
     in
-    Process.run ~dir Strict (Path.to_string sh) [arg; cmd]
-    >>= fun () ->
+    Process.run ~dir Strict (Path.to_string sh) [arg; cmd];
     die "command reported no differences: %s"
       (if dir = "." then
          cmd
@@ -55,7 +51,6 @@ let print path1 path2 =
             "-ascii"
         ; file1
         ; file2
-        ]
-      >>= fun () ->
+        ];
       (* Use "diff" if "patdiff" reported no differences *)
       normal_diff ()
